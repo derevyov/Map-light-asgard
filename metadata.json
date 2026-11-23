@@ -1,0 +1,6 @@
+{
+  "name": "Південноукраїнськ — Карта ГПВ ДПЕМ",
+  "description": "Интерактивная карта графиков почасовых отключений электроэнергии г. Пивденноукраинск (ДПЕМ ПрАТ «Атомсервіс») на базе OpenStreetMap + Leaflet с парсингом очередей, обработкой двойных вводов, переносами фидеров и Diff-перерисовкой.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

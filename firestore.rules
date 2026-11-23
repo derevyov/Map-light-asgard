@@ -1,0 +1,509 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Shared global primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerified() && request.auth.uid == uid;
+    }
+
+    // Super Admin (immutable root authority)
+    function isSuperAdmin() {
+      return isVerified() && request.auth.token.email == 'derevyov@gmail.com';
+    }
+
+    function hasRoleDoc(uid) {
+      return exists(/databases/$(database)/documents/userRoles/$(uid));
+    }
+
+    function roleDoc(uid) {
+      return get(/databases/$(database)/documents/userRoles/$(uid)).data;
+    }
+
+    function isNotBanned() {
+      return isSuperAdmin() || (
+        isVerified() && (
+          !hasRoleDoc(request.auth.uid) ||
+          roleDoc(request.auth.uid).status != 'banned'
+        )
+      );
+    }
+
+    // Active Admin (Super Admin OR delegated active Admin)
+    function isActiveAdmin() {
+      return isSuperAdmin() || (
+        isVerified() &&
+        hasRoleDoc(request.auth.uid) &&
+        roleDoc(request.auth.uid).role == 'admin' &&
+        roleDoc(request.auth.uid).status == 'active'
+      );
+    }
+
+    // Active Editor (Super Admin OR active Admin OR active Editor)
+    function isActiveEditor() {
+      return isActiveAdmin() || (
+        isVerified() &&
+        hasRoleDoc(request.auth.uid) &&
+        roleDoc(request.auth.uid).role == 'editor' &&
+        roleDoc(request.auth.uid).status == 'active'
+      );
+    }
+
+    function isValidSubqueue(q) {
+      return q is string && q in ['1-1', '1-2', '2-1', '2-2', '3-1', '3-2', '4-1', '4-2', '5-1', '5-2', '6-1', '6-2'];
+    }
+
+    function isValidOptionalSubqueue(q) {
+      return q is string && q in ['', '1-1', '1-2', '2-1', '2-2', '3-1', '3-2', '4-1', '4-2', '5-1', '5-2', '6-1', '6-2'];
+    }
+
+    function isValidDualType(t) {
+      return t is string && t in ['none', 'backup', 'split_entrances', 'split_lifts'];
+    }
+
+    function isValidHistoryAction(a) {
+      return a is string && a in ['point_added', 'point_removed', 'collision_changed', 'dual_mode_changed'];
+    }
+
+    function isValidAuditEventType(t) {
+      return t is string && t in [
+        'login',
+        'point_added',
+        'point_removed',
+        'collision_changed',
+        'dual_mode_changed',
+        'transfer_created',
+        'transfer_removed',
+        'access_requested',
+        'role_granted',
+        'user_banned',
+        'user_unbanned',
+        'role_deleted'
+      ];
+    }
+
+    function isValidCityLat(lat) {
+      return lat is number && lat >= 47.70 && lat <= 47.95;
+    }
+
+    function isValidCityLng(lng) {
+      return lng is number && lng >= 31.00 && lng <= 31.35;
+    }
+
+    // Validation Blueprint: FeederTransfer
+    function isValidTransfer(data) {
+      return data.keys().hasAll([
+          'street', 'houses', 'targetQueue', 'targetFeeder',
+          'authorUid', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'street', 'houses', 'targetQueue', 'targetFeeder', 'reason',
+          'authorUid', 'authorName', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.street is string && data.street.size() >= 2 && data.street.size() <= 120 &&
+        data.houses is list && data.houses.size() >= 1 && data.houses.size() <= 50 &&
+        data.houses[0] is string && data.houses[0].size() >= 1 && data.houses[0].size() <= 32 &&
+        isValidSubqueue(data.targetQueue) &&
+        data.targetFeeder is string && data.targetFeeder.size() <= 80 &&
+        (!('reason' in data) || (data.reason is string && data.reason.size() <= 240)) &&
+        (!('authorName' in data) || (data.authorName is string && data.authorName.size() <= 80)) &&
+        isValidId(data.authorUid) &&
+        data.status is string && data.status in ['active', 'archived'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: BuildingOverride
+    function isValidOverride(data) {
+      return data.keys().hasAll([
+          'addressKey', 'dualType', 'authorUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'addressKey', 'primary', 'secondary', 'dualType', 'note',
+          'authorUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.addressKey is string && data.addressKey.size() >= 3 && data.addressKey.size() <= 160 &&
+        (!('primary' in data) || isValidOptionalSubqueue(data.primary)) &&
+        (!('secondary' in data) || isValidOptionalSubqueue(data.secondary)) &&
+        isValidDualType(data.dualType) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 240)) &&
+        isValidId(data.authorUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ManualPoint
+    function isValidManualPoint(data) {
+      return data.keys().hasAll([
+          'label', 'queue', 'feeder', 'note', 'lat', 'lng',
+          'status', 'authorUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'label', 'queue', 'feeder', 'note', 'lat', 'lng',
+          'status', 'authorUid', 'authorName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.label is string && data.label.size() >= 2 && data.label.size() <= 100 &&
+        isValidSubqueue(data.queue) &&
+        data.feeder is string && data.feeder.size() <= 80 &&
+        data.note is string && data.note.size() <= 240 &&
+        isValidCityLat(data.lat) &&
+        isValidCityLng(data.lng) &&
+        data.status is string && data.status in ['active', 'archived'] &&
+        isValidId(data.authorUid) &&
+        (!('authorName' in data) || (data.authorName is string && data.authorName.size() <= 80)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AssignmentHistory
+    function isValidHistoryEntry(data) {
+      return data.keys().hasAll([
+          'action', 'title', 'details', 'authorUid', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'action', 'title', 'details', 'queue', 'lat', 'lng',
+          'buildingKey', 'authorUid', 'authorName', 'createdAt'
+        ]) &&
+        isValidHistoryAction(data.action) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.details is string && data.details.size() >= 1 && data.details.size() <= 280 &&
+        (!('queue' in data) || isValidOptionalSubqueue(data.queue)) &&
+        (!('lat' in data) || isValidCityLat(data.lat)) &&
+        (!('lng' in data) || isValidCityLng(data.lng)) &&
+        (!('buildingKey' in data) || (data.buildingKey is string && data.buildingKey.size() <= 160)) &&
+        isValidId(data.authorUid) &&
+        (!('authorName' in data) || (data.authorName is string && data.authorName.size() <= 80)) &&
+        data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: UserRole (RBAC + granter lineage)
+    function isValidUserRole(data) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'role', 'status', 'grantedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'displayName', 'contactLabel', 'role', 'status',
+          'grantedByUid', 'grantedByName', 'bannedByUid', 'banReason', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        (!('contactLabel' in data) || (data.contactLabel is string && data.contactLabel.size() <= 80)) &&
+        data.role is string && data.role in ['viewer', 'editor', 'admin'] &&
+        data.status is string && data.status in ['active', 'banned'] &&
+        isValidId(data.grantedByUid) &&
+        (!('grantedByName' in data) || (data.grantedByName is string && data.grantedByName.size() <= 80)) &&
+        (!('bannedByUid' in data) || (data.bannedByUid is string && data.bannedByUid.size() <= 128)) &&
+        (!('banReason' in data) || (data.banReason is string && data.banReason.size() <= 240)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AccessRequest
+    function isValidAccessRequest(data) {
+      return data.keys().hasAll([
+          'requesterUid', 'requesterName', 'requestedRole', 'reason', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'requesterUid', 'requesterName', 'telegramHandle', 'requestedRole',
+          'reason', 'status', 'grantedRole', 'reviewedByUid', 'reviewedByName',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.requesterUid) &&
+        data.requesterName is string && data.requesterName.size() >= 1 && data.requesterName.size() <= 80 &&
+        (!('telegramHandle' in data) || (data.telegramHandle is string && data.telegramHandle.size() <= 64)) &&
+        data.requestedRole is string && data.requestedRole in ['editor', 'admin'] &&
+        data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 240 &&
+        data.status is string && data.status in ['pending', 'approved', 'rejected'] &&
+        (!('grantedRole' in data) || (data.grantedRole is string && data.grantedRole in ['', 'editor', 'admin'])) &&
+        (!('reviewedByUid' in data) || (data.reviewedByUid is string && data.reviewedByUid.size() <= 128)) &&
+        (!('reviewedByName' in data) || (data.reviewedByName is string && data.reviewedByName.size() <= 80)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AuditEvent
+    function isValidAuditEvent(data) {
+      return data.keys().hasAll([
+          'eventType', 'summary', 'actorUid', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'eventType', 'summary', 'actorUid', 'actorName', 'createdAt'
+        ]) &&
+        isValidAuditEventType(data.eventType) &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 240 &&
+        isValidId(data.actorUid) &&
+        (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 80)) &&
+        data.createdAt is timestamp;
+    }
+
+    // Validation Blueprint: UserPreference (Private PII: home address)
+    function isValidUserPref(data) {
+      return data.keys().hasAll(['myHomeKey', 'updatedAt']) &&
+        data.keys().hasOnly(['myHomeKey', 'updatedAt']) &&
+        data.myHomeKey is string && data.myHomeKey.size() <= 160 &&
+        data.updatedAt is timestamp;
+    }
+
+    // Public city infrastructure transfers (writable ONLY by active editors/admins)
+    match /transfers/{transferId} {
+      allow get: if isValidId(transferId) && existing().status == 'active';
+      allow list: if resource.data.status == 'active';
+
+      allow create: if isActiveEditor() &&
+        isValidId(transferId) &&
+        isValidTransfer(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().status == 'active' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isActiveEditor() &&
+        isValidId(transferId) &&
+        isValidTransfer(incoming()) &&
+        incoming().authorUid == existing().authorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (existing().status != 'archived' || isActiveAdmin()) &&
+        (
+          (isActiveAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['street', 'houses', 'targetQueue', 'targetFeeder', 'reason', 'status', 'updatedAt'])) ||
+          (existing().authorUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+
+      allow delete: if isActiveEditor() &&
+        isValidId(transferId) &&
+        (existing().authorUid == request.auth.uid || isActiveAdmin());
+    }
+
+    // Public city building dual-queue overrides (writable ONLY by active editors/admins)
+    match /overrides/{overrideId} {
+      allow get: if isValidId(overrideId) && isValidDualType(existing().dualType);
+      allow list: if resource.data.dualType in ['none', 'backup', 'split_entrances', 'split_lifts'];
+
+      allow create: if isActiveEditor() &&
+        isValidId(overrideId) &&
+        isValidOverride(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isActiveEditor() &&
+        isValidId(overrideId) &&
+        isValidOverride(incoming()) &&
+        incoming().addressKey == existing().addressKey &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isActiveAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['primary', 'secondary', 'dualType', 'note', 'authorUid', 'updatedAt'])) ||
+          (existing().authorUid == request.auth.uid && incoming().authorUid == existing().authorUid && incoming().diff(existing()).affectedKeys().hasOnly(['primary', 'secondary', 'dualType', 'note', 'updatedAt']))
+        );
+
+      allow delete: if isActiveEditor() &&
+        isValidId(overrideId) &&
+        (existing().authorUid == request.auth.uid || isActiveAdmin());
+    }
+
+    // Public user-pinned map points (writable ONLY by active editors/admins)
+    match /manualPoints/{pointId} {
+      allow get: if isValidId(pointId) && existing().status == 'active';
+      allow list: if resource.data.status == 'active';
+
+      allow create: if isActiveEditor() &&
+        isValidId(pointId) &&
+        isValidManualPoint(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().status == 'active' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isActiveEditor() &&
+        isValidId(pointId) &&
+        isValidManualPoint(incoming()) &&
+        incoming().authorUid == existing().authorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (existing().status != 'archived' || isActiveAdmin()) &&
+        (
+          (isActiveAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'queue', 'feeder', 'note', 'lat', 'lng', 'status', 'updatedAt'])) ||
+          (existing().authorUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'queue', 'feeder', 'note', 'status', 'updatedAt']))
+        );
+
+      allow delete: if isActiveEditor() &&
+        isValidId(pointId) &&
+        (existing().authorUid == request.auth.uid || isActiveAdmin());
+    }
+
+    // Public shared append-only assignment history journal
+    match /assignmentHistory/{entryId} {
+      allow get: if isValidId(entryId) && isValidHistoryAction(existing().action);
+      allow list: if resource.data.action in ['point_added', 'point_removed', 'collision_changed', 'dual_mode_changed'];
+
+      allow create: if isActiveEditor() &&
+        isValidId(entryId) &&
+        isValidHistoryEntry(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+
+      allow update: if false;
+
+      allow delete: if isActiveAdmin() && isValidId(entryId);
+    }
+
+    // RBAC User Roles & Lineage-Restricted Banning
+    match /userRoles/{targetUid} {
+      allow get: if isValidId(targetUid) && (isOwner(targetUid) || isActiveAdmin());
+      allow list: if isVerified() &&
+        resource.data.role in ['viewer', 'editor', 'admin'] &&
+        resource.data.status in ['active', 'banned'];
+
+      // Super Admin or Active Admin can grant editor or admin role (records granter UID)
+      allow create: if isActiveAdmin() &&
+        isValidId(targetUid) &&
+        targetUid != request.auth.uid &&
+        isValidUserRole(incoming()) &&
+        incoming().uid == targetUid &&
+        incoming().role in ['editor', 'admin'] &&
+        incoming().status == 'active' &&
+        incoming().grantedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      // Super Admin: full control (change role, ban/unban any editor or admin)
+      // Delegated Admin: can manage/ban ANY editor OR an admin whom THEY added (grantedByUid == request.auth.uid)
+      allow update: if isActiveAdmin() &&
+        isValidId(targetUid) &&
+        isValidUserRole(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isSuperAdmin() ||
+          (
+            targetUid != request.auth.uid &&
+            incoming().grantedByUid == existing().grantedByUid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'bannedByUid', 'banReason', 'updatedAt']) &&
+            (
+              existing().role == 'editor' ||
+              (existing().role == 'admin' && existing().grantedByUid == request.auth.uid)
+            )
+          )
+        );
+
+      // ONLY Super Admin can permanently delete admin/editor role records
+      allow delete: if isSuperAdmin() && isValidId(targetUid);
+    }
+
+    // Access Requests from users to admins for edit/admin rights
+    match /accessRequests/{requestId} {
+      allow get: if isValidId(requestId) && (isOwner(existing().requesterUid) || isActiveAdmin());
+      allow list: if isVerified() && resource.data.status in ['pending', 'approved', 'rejected'];
+
+      allow create: if isVerified() &&
+        isNotBanned() &&
+        isValidId(requestId) &&
+        isValidAccessRequest(incoming()) &&
+        incoming().requesterUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().requestedRole in ['editor', 'admin'] &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isActiveAdmin() &&
+        isValidId(requestId) &&
+        isValidAccessRequest(incoming()) &&
+        existing().status == 'pending' &&
+        incoming().status in ['approved', 'rejected'] &&
+        incoming().requesterUid == existing().requesterUid &&
+        incoming().requesterName == existing().requesterName &&
+        incoming().requestedRole == existing().requestedRole &&
+        incoming().reason == existing().reason &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().reviewedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'grantedRole', 'reviewedByUid', 'reviewedByName', 'updatedAt']);
+
+      allow delete: if isValidId(requestId) && (
+        isSuperAdmin() ||
+        (isOwner(existing().requesterUid) && existing().status == 'pending')
+      );
+    }
+
+    // Admin-only append-only audit telemetry (logins, RBAC, and edits)
+    match /auditEvents/{eventId} {
+      allow get: if isValidId(eventId) && isActiveAdmin() && isValidAuditEventType(existing().eventType);
+      allow list: if isSuperAdmin() && resource.data.eventType in [
+        'login',
+        'point_added',
+        'point_removed',
+        'collision_changed',
+        'dual_mode_changed',
+        'transfer_created',
+        'transfer_removed',
+        'access_requested',
+        'role_granted',
+        'user_banned',
+        'user_unbanned',
+        'role_deleted'
+      ];
+
+      allow create: if isVerified() &&
+        isValidId(eventId) &&
+        isValidAuditEvent(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+
+      allow update: if false;
+
+      allow delete: if isValidId(eventId) && isSuperAdmin();
+    }
+
+    // Private per-user preferences (PII isolated to owner only; no list allowed)
+    match /userPrefs/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserPref(incoming()) &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserPref(incoming()) &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['myHomeKey', 'updatedAt']);
+
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    // Legacy admin registry (read own marker only; client writes strictly forbidden)
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && isOwner(adminUid);
+      allow list, write: if false;
+    }
+  }
+}

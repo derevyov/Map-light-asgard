@@ -1,0 +1,462 @@
+{
+  "entities": {
+    "FeederTransfer": {
+      "title": "FeederTransfer",
+      "description": "Shared temporary feeder/queue transfer for one or more houses on a street in Pivdennoukrainsk.",
+      "type": "object",
+      "properties": {
+        "street": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120,
+          "description": "Normalized or display street name."
+        },
+        "houses": {
+          "type": "array",
+          "description": "Bounded list (1..50) of affected house numbers."
+        },
+        "targetQueue": {
+          "type": "string",
+          "enum": ["1-1", "1-2", "2-1", "2-2", "3-1", "3-2", "4-1", "4-2", "5-1", "5-2", "6-1", "6-2"],
+          "description": "Destination subqueue ID."
+        },
+        "targetFeeder": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Optional destination feeder label."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Optional explanation or emergency notice."
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the creator."
+        },
+        "authorName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Display name of creator (non-PII)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "description": "Lifecycle state of the transfer."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": ["street", "houses", "targetQueue", "targetFeeder", "authorUid", "status", "createdAt", "updatedAt"]
+    },
+    "BuildingOverride": {
+      "title": "BuildingOverride",
+      "description": "Shared dual-queue resolution rule for a multi-feeder building.",
+      "type": "object",
+      "properties": {
+        "addressKey": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160,
+          "description": "Canonical normalized street|house key."
+        },
+        "primary": {
+          "type": "string",
+          "enum": ["", "1-1", "1-2", "2-1", "2-2", "3-1", "3-2", "4-1", "4-2", "5-1", "5-2", "6-1", "6-2"],
+          "description": "Primary subqueue ID."
+        },
+        "secondary": {
+          "type": "string",
+          "enum": ["", "1-1", "1-2", "2-1", "2-2", "3-1", "3-2", "4-1", "4-2", "5-1", "5-2", "6-1", "6-2"],
+          "description": "Optional secondary subqueue ID or empty string."
+        },
+        "dualType": {
+          "type": "string",
+          "enum": ["none", "backup", "split_entrances", "split_lifts"],
+          "description": "How dual queues affect this building."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Optional operator/resident note."
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the creator/updater."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated."
+        }
+      },
+      "required": ["addressKey", "dualType", "authorUid", "createdAt", "updatedAt"]
+    },
+    "ManualPoint": {
+      "title": "ManualPoint",
+      "description": "Shared user-pinned map coordinate for locations without a known street address.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100,
+          "description": "Short human-readable name of the pinned point."
+        },
+        "queue": {
+          "type": "string",
+          "enum": ["1-1", "1-2", "2-1", "2-2", "3-1", "3-2", "4-1", "4-2", "5-1", "5-2", "6-1", "6-2"],
+          "description": "Assigned DPEM subqueue ID."
+        },
+        "feeder": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Optional feeder or substation note."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Optional comment for the point."
+        },
+        "lat": {
+          "type": "number",
+          "description": "Latitude within Pivdennoukrainsk area (47.70..47.95)."
+        },
+        "lng": {
+          "type": "number",
+          "description": "Longitude within Pivdennoukrainsk area (31.00..31.35)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"],
+          "description": "Lifecycle state of the manual point."
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the creator."
+        },
+        "authorName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Display name of creator (non-PII)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": ["label", "queue", "feeder", "note", "lat", "lng", "status", "authorUid", "createdAt", "updatedAt"]
+    },
+    "AssignmentHistory": {
+      "title": "AssignmentHistory",
+      "description": "Shared append-only audit journal of manual point pins and collision queue changes visible to all viewers.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["point_added", "point_removed", "collision_changed", "dual_mode_changed"],
+          "description": "Category of assignment action."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Affected building address or point label."
+        },
+        "details": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 280,
+          "description": "Human-readable change summary."
+        },
+        "queue": {
+          "type": "string",
+          "enum": ["", "1-1", "1-2", "2-1", "2-2", "3-1", "3-2", "4-1", "4-2", "5-1", "5-2", "6-1", "6-2"],
+          "description": "Optional assigned subqueue ID."
+        },
+        "lat": {
+          "type": "number",
+          "description": "Optional latitude coordinate."
+        },
+        "lng": {
+          "type": "number",
+          "description": "Optional longitude coordinate."
+        },
+        "buildingKey": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "Optional normalized building key or manual point reference."
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the actor."
+        },
+        "authorName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Display name of actor (non-PII)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when logged."
+        }
+      },
+      "required": ["action", "title", "details", "authorUid", "createdAt"]
+    },
+    "UserRole": {
+      "title": "UserRole",
+      "description": "RBAC role and moderation status for a user, tracking who granted the role for lineage-restricted banning.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the member."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Public display name (non-PII)."
+        },
+        "contactLabel": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Optional masked handle or Telegram @username."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["viewer", "editor", "admin"],
+          "description": "Assigned role."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "banned"],
+          "description": "Moderation status."
+        },
+        "grantedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the admin or super admin who granted this role."
+        },
+        "grantedByName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Display name of granter."
+        },
+        "bannedByUid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Optional UID of admin who banned the user."
+        },
+        "banReason": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Optional reason for ban."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "role", "status", "grantedByUid", "createdAt", "updatedAt"]
+    },
+    "AccessRequest": {
+      "title": "AccessRequest",
+      "description": "User request to admins for editor or admin permissions.",
+      "type": "object",
+      "properties": {
+        "requesterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "requesterName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "telegramHandle": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "requestedRole": {
+          "type": "string",
+          "enum": ["editor", "admin"]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 240
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "grantedRole": {
+          "type": "string",
+          "enum": ["", "editor", "admin"]
+        },
+        "reviewedByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "reviewedByName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["requesterUid", "requesterName", "requestedRole", "reason", "status", "createdAt", "updatedAt"]
+    },
+    "AuditEvent": {
+      "title": "AuditEvent",
+      "description": "Append-only authenticated session, RBAC, and edit audit event readable only by administrators.",
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "type": "string",
+          "enum": [
+            "login",
+            "point_added",
+            "point_removed",
+            "collision_changed",
+            "dual_mode_changed",
+            "transfer_created",
+            "transfer_removed",
+            "access_requested",
+            "role_granted",
+            "user_banned",
+            "user_unbanned",
+            "role_deleted"
+          ],
+          "description": "Type of audited session, RBAC, or edit event."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "description": "Concise human-readable summary of the event."
+        },
+        "actorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the authenticated actor."
+        },
+        "actorName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Display name of the actor (non-PII)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when event occurred."
+        }
+      },
+      "required": ["eventType", "summary", "actorUid", "createdAt"]
+    },
+    "UserPreference": {
+      "title": "UserPreference",
+      "description": "Private per-user saved home address key.",
+      "type": "object",
+      "properties": {
+        "myHomeKey": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "Canonical street|house key of the user's home."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated."
+        }
+      },
+      "required": ["myHomeKey", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/transfers/{transferId}": {
+      "schema": { "$ref": "#/entities/FeederTransfer" },
+      "description": "Shared temporary feeder/queue transfers visible to all city map viewers; writable by active editors/admins."
+    },
+    "/overrides/{overrideId}": {
+      "schema": { "$ref": "#/entities/BuildingOverride" },
+      "description": "Shared dual-queue overrides for multi-feeder buildings; writable by active editors/admins."
+    },
+    "/manualPoints/{pointId}": {
+      "schema": { "$ref": "#/entities/ManualPoint" },
+      "description": "Shared user-pinned map coordinates without known street addresses; writable by active editors/admins."
+    },
+    "/assignmentHistory/{entryId}": {
+      "schema": { "$ref": "#/entities/AssignmentHistory" },
+      "description": "Shared append-only assignment history journal visible to all viewers."
+    },
+    "/userRoles/{targetUid}": {
+      "schema": { "$ref": "#/entities/UserRole" },
+      "description": "RBAC role and ban registry with granter lineage enforcement."
+    },
+    "/accessRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/AccessRequest" },
+      "description": "Pending and reviewed user requests for editor or admin rights."
+    },
+    "/auditEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/AuditEvent" },
+      "description": "Admin-only append-only audit telemetry of authenticated logins, RBAC changes, and edits."
+    },
+    "/userPrefs/{userId}": {
+      "schema": { "$ref": "#/entities/UserPreference" },
+      "description": "Private per-user home address preference, readable and writable only by the owner."
+    }
+  }
+}

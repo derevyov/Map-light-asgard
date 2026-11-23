@@ -1,0 +1,178 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+@import "leaflet/dist/leaflet.css";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --app-height: var(--tg-viewport-stable-height, 100dvh);
+  }
+
+  body {
+    font-family: var(--font-sans);
+    overflow: hidden;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .font-mono,
+  .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom sleek range slider for 48 half-hour slots */
+input[type='range'].dpem-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: #cbd5e1;
+  border-radius: 9999px;
+  outline: none;
+}
+
+.dark input[type='range'].dpem-slider {
+  background: #1e293b;
+}
+
+input[type='range'].dpem-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #0284c7;
+  border: 2px solid #ffffff;
+  cursor: pointer;
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.dark input[type='range'].dpem-slider::-webkit-slider-thumb {
+  background: #38bdf8;
+  border-color: #0b1120;
+}
+
+input[type='range'].dpem-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type='range'].dpem-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #0284c7;
+  border: 2px solid #ffffff;
+  cursor: pointer;
+}
+
+.dark input[type='range'].dpem-slider::-moz-range-thumb {
+  background: #38bdf8;
+  border-color: #0b1120;
+}
+
+/* Leaflet map container & theme-aware controls (100% free OSM tiles, zero API keys) */
+.leaflet-container {
+  background: #e2e8f0;
+  font-family: var(--font-sans);
+}
+
+.dark .leaflet-container {
+  background: #0b1120;
+}
+
+/* Pure free OpenStreetMap tiles cleanly adapted for dark mode without paid tile keys */
+.osm-dark-tiles .leaflet-tile-pane {
+  filter: invert(100%) hue-rotate(180deg) brightness(93%) contrast(92%) saturate(82%);
+}
+
+/* Crosshair cursor when picking a point without mutating Leaflet's container className */
+.pick-mode-active .leaflet-container,
+.pick-mode-active .leaflet-grab {
+  cursor: crosshair !important;
+}
+
+.leaflet-control-zoom a {
+  background-color: #ffffff;
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+
+.leaflet-control-zoom a:hover {
+  background-color: #f1f5f9;
+  color: #0284c7;
+}
+
+.dark .leaflet-control-zoom a {
+  background-color: #111827;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+.dark .leaflet-control-zoom a:hover {
+  background-color: #1e293b;
+  color: #38bdf8;
+}
+
+.leaflet-control-attribution {
+  background: rgba(255, 255, 255, 0.88);
+  color: #475569;
+  font-size: 11px;
+}
+
+.dark .leaflet-control-attribution {
+  background: rgba(11, 17, 32, 0.88);
+  color: #94a3b8;
+}
+
+.leaflet-control-attribution a {
+  color: #0284c7;
+}
+
+.dark .leaflet-control-attribution a {
+  color: #38bdf8;
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+}
+
+.dark .leaflet-popup-content-wrapper,
+.dark .leaflet-popup-tip {
+  background: #111827;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+/* Subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}

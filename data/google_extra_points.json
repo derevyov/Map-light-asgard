@@ -1,0 +1,200 @@
+[
+  {
+    "id": "g_nez_20_145",
+    "street": "пр-т Незалежності",
+    "house": "20/145",
+    "label": "пр-т Незалежності, 20/145",
+    "lat": 47.82665,
+    "lng": 31.16835,
+    "category": "residential"
+  },
+  {
+    "id": "g_myru_14_123",
+    "street": "вул. Миру",
+    "house": "14/1/2/3",
+    "label": "вул. Миру, 14/1/2/3",
+    "lat": 47.82045,
+    "lng": 31.17495,
+    "category": "residential"
+  },
+  {
+    "id": "g_evr_5_2",
+    "street": "вул. Європейська",
+    "house": "5/2",
+    "label": "вул. Європейська, 5/2",
+    "lat": 47.82090,
+    "lng": 31.17865,
+    "category": "residential"
+  },
+  {
+    "id": "g_evr_5_5",
+    "street": "вул. Європейська",
+    "house": "5/5",
+    "label": "вул. Європейська, 5/5",
+    "lat": 47.82135,
+    "lng": 31.17810,
+    "category": "residential"
+  },
+  {
+    "id": "g_evr_36_1",
+    "street": "вул. Європейська",
+    "house": "36/1",
+    "label": "вул. Європейська, 36/1",
+    "lat": 47.82670,
+    "lng": 31.17535,
+    "category": "residential"
+  },
+  {
+    "id": "g_shev_3s3",
+    "street": "б-р Шевченка",
+    "house": "3с/3",
+    "label": "б-р Шевченка, 3с/3",
+    "lat": 47.82355,
+    "lng": 31.16420,
+    "category": "residential"
+  },
+  {
+    "id": "g_gurt_1",
+    "street": "гуртожитки",
+    "house": "1",
+    "label": "Гуртожиток №1 (м-н 1)",
+    "lat": 47.81950,
+    "lng": 31.17740,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_2",
+    "street": "гуртожитки",
+    "house": "2",
+    "label": "Гуртожиток №2",
+    "lat": 47.81915,
+    "lng": 31.17795,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_3",
+    "street": "гуртожитки",
+    "house": "3",
+    "label": "Гуртожиток №3",
+    "lat": 47.81885,
+    "lng": 31.17680,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_4",
+    "street": "гуртожитки",
+    "house": "4",
+    "label": "Гуртожиток №4",
+    "lat": 47.81850,
+    "lng": 31.17735,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_5",
+    "street": "гуртожитки",
+    "house": "5",
+    "label": "Гуртожиток №5",
+    "lat": 47.81820,
+    "lng": 31.17615,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_6",
+    "street": "гуртожитки",
+    "house": "6",
+    "label": "Гуртожиток №6",
+    "lat": 47.81785,
+    "lng": 31.17675,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_7",
+    "street": "гуртожитки",
+    "house": "7",
+    "label": "Гуртожиток №7",
+    "lat": 47.81760,
+    "lng": 31.17555,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_gurt_8",
+    "street": "гуртожитки",
+    "house": "8",
+    "label": "Гуртожиток №8",
+    "lat": 47.81725,
+    "lng": 31.17610,
+    "category": "dormitory"
+  },
+  {
+    "id": "g_dkp_1",
+    "street": "вул. Набережна Енергетиків",
+    "house": "35",
+    "label": "ДКП-1 (Дитячий комбінат / поліклініка)",
+    "lat": 47.82620,
+    "lng": 31.16185,
+    "category": "public"
+  },
+  {
+    "id": "g_krytyi_rynok",
+    "street": "вул. Європейська",
+    "house": "25",
+    "label": "КП «Критий ринок»",
+    "lat": 47.82560,
+    "lng": 31.17395,
+    "category": "commercial"
+  },
+  {
+    "id": "g_nyzhnii_rynok",
+    "street": "вул. Набережна Енергетиків",
+    "house": "43",
+    "label": "Нижній ринок «Відрадний»",
+    "lat": 47.83125,
+    "lng": 31.16170,
+    "category": "commercial"
+  },
+  {
+    "id": "g_olimp",
+    "street": "вул. Паркова",
+    "house": "7",
+    "label": "СК «Олімп»",
+    "lat": 47.81690,
+    "lng": 31.17190,
+    "category": "public"
+  },
+  {
+    "id": "g_miskvykonkom",
+    "street": "вул. Європейська",
+    "house": "42",
+    "label": "Міськвиконком",
+    "lat": 47.82780,
+    "lng": 31.17495,
+    "category": "public"
+  },
+  {
+    "id": "g_telecenter",
+    "street": "пр-т Незалежності",
+    "house": "24",
+    "label": "Телецентр / ПриватБанк",
+    "lat": 47.82865,
+    "lng": 31.16695,
+    "category": "public"
+  },
+  {
+    "id": "g_slaiz",
+    "street": "вул. Європейська",
+    "house": "11",
+    "label": "Ковзанка «Слайз» / Міський суд",
+    "lat": 47.82245,
+    "lng": 31.17735,
+    "category": "public"
+  },
+  {
+    "id": "g_bk",
+    "street": "б-р Шкільний",
+    "house": "4",
+    "label": "ПК «Енергетик» (Будинок культури)",
+    "lat": 47.82195,
+    "lng": 31.16825,
+    "category": "public"
+  }
+]

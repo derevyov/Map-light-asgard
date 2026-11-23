@@ -1,0 +1,6 @@
+name = "dpem-outage-map-worker"
+main = "backend/worker.js"
+compatibility_date = "2025-01-15"
+
+[observability]
+enabled = true

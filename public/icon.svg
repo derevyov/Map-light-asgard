@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#0b1120" />
+    </linearGradient>
+    <linearGradient id="pin" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+    <linearGradient id="bolt" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fde047" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <g opacity="0.18" stroke="#38bdf8" stroke-width="4" fill="none">
+    <path d="M64 156 H448 M64 256 H448 M64 356 H448" />
+    <path d="M156 64 V448 M256 64 V448 M356 64 V448" />
+  </g>
+  <path
+    d="M256 76 C174 76 112 138 112 218 C112 318 256 440 256 440 C256 440 400 318 400 218 C400 138 338 76 256 76 Z"
+    fill="url(#pin)"
+  />
+  <circle cx="256" cy="212" r="96" fill="#0b1120" />
+  <path
+    d="M270 136 L204 222 H252 L240 288 L308 200 H260 Z"
+    fill="url(#bolt)"
+    stroke="#fef08a"
+    stroke-width="4"
+    stroke-linejoin="round"
+  />
+</svg>

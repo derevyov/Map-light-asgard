@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Карта ДПЕМ — Південноукраїнськ (Real Parser + OSM + Diff)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { --bg:#0f172a; --panel:#1e293b; --border:#334155; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+    header { padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    input, select, button, label.fileBtn { background: var(--bg); color: var(--text); border: 1px solid #475569; border-radius: 6px; padding: 6px 9px; font-size: 13px; }
+    button, label.fileBtn { cursor: pointer; background: #2563eb; border-color: #3b82f6; font-weight: 600; }
+    button.sec { background: #334155; border-color: #475569; font-weight: 500; }
+    button.warn { background: #b45309; border-color: #d97706; }
+    #timelineBar { padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+    .sliderWrap { display: flex; align-items: center; gap: 12px; }
+    #timeSlider { flex: 1; padding: 0; cursor: pointer; }
+    #timeLabel { min-width: 125px; font-size: 1.15rem; font-weight: 700; color: var(--accent); }
+    .pills { display: flex; flex-wrap: wrap; gap: 5px; }
+    .pill { padding: 3px 8px; border-radius: 999px; font-size: 12px; cursor: pointer; border: 1px solid #475569; user-select: none; }
+    .pill.off { background: #dc2626; border-color: #f87171; color: #fff; }
+    .pill.switch_off, .pill.switch_on { background: #ea580c; border-color: #fb923c; color: #fff; }
+    .pill.possible { background: #ca8a04; border-color: #facc15; color: #fff; }
+    .pill.on { background: #16a34a33; border-color: #22c55e; color: #86efac; }
+    .pill.active { outline: 2px solid var(--accent); }
+    .workspace { flex: 1; display: flex; min-height: 0; position: relative; }
+    #map { flex: 1; }
+    aside { width: 345px; background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; padding: 12px; gap: 10px; font-size: 13px; }
+    @media (max-width: 900px) { aside { display: none; } }
+    .card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .card h4 { margin: 0 0 8px 0; font-size: 13px; color: var(--accent); display: flex; justify-content: space-between; align-items: center; }
+    .log { max-height: 150px; overflow-y: auto; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+    .log b { color: var(--text); }
+    .legend { position: absolute; bottom: 14px; left: 14px; z-index: 999; background: #1e293bee; border: 1px solid #475569; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+    .dot { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+    #searchResults { position: absolute; top: 100%; left: 0; right: 0; background: var(--panel); border: 1px solid #475569; border-radius: 6px; z-index: 2000; max-height: 220px; overflow-y: auto; display: none; }
+    #searchResults div { padding: 6px 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); }
+    #searchResults div:hover { background: #334155; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <div>
+        <strong>Південноукраїнськ — Карта ГПВ ДПЕМ</strong>
+        <div id="pollStatus" style="font-size:11px;color:var(--muted);">Загрузите off_graf.html или подключите Worker API</div>
+      </div>
+      <div style="position:relative;">
+        <input id="addrSearch" type="text" placeholder="Поиск (Незалежності 6)..." style="width:210px;" autocomplete="off" />
+        <div id="searchResults"></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="fileBtn">📂 Загрузить HTML файл<input id="htmlFileInput" type="file" accept=".html,.htm,.txt" hidden /></label>
+      <select id="dateSelect"></select>
+      <select id="feederFilter"><option value="">Все подстанции/фидеры</option></select>
+      <select id="dualMode">
+        <option value="primary">2 очереди: только основная</option>
+        <option value="split" selected>2 очереди: подъезды / лифты</option>
+      </select>
+      <button id="playBtn">▶ День</button>
+      <button id="pollNowBtn" class="sec">↻ Опрос</button>
+    </div>
+  </header>
+
+  <section id="timelineBar">
+    <div class="sliderWrap">
+      <span id="timeLabel">19:00 – 19:30</span>
+      <input id="timeSlider" type="range" min="0" max="47" value="38" step="1" />
+      <button id="nowBtn" class="sec">Сейчас</button>
+      <button id="resetFilterBtn" class="sec">Сброс</button>
+    </div>
+    <div class="pills" id="queuePills"></div>
+  </section>
+
+  <div class="workspace">
+    <div id="map"></div>
+    <aside>
+      <div class="card">
+        <h4>🏠 Мой дом <button id="clearHomeBtn" class="sec" style="padding:2px 6px;font-size:11px;display:none;">Сброс</button></h4>
+        <div id="myHomeBody" style="color:var(--muted);">Кликните по зданию и нажмите «Сделать моим домом».</div>
+      </div>
+
+      <div class="card">
+        <h4>📊 Статистика базы адресов</h4>
+        <div id="statsBody" style="font-size:12px;color:var(--muted);">Загрузите HTML файл для авто-поиска всех пересечений 2 очередей.</div>
+      </div>
+
+      <div class="card">
+        <h4>🔀 Перенос адресов на другой фидер</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <input id="trStreet" placeholder="Улица (напр. Незалежності)" />
+          <input id="trHouses" placeholder="Дома (напр. 1, 3, 5)" />
+          <div class="row">
+            <select id="trTargetQueue" style="flex:1;"></select>
+            <input id="trTargetFeeder" placeholder="Фидер (напр. Б-12)" style="flex:1;" />
+          </div>
+          <button id="addTransferBtn" class="warn">Применить перенос</button>
+          <div id="transfersList" style="font-size:12px;color:var(--muted);"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>📡 Live API (Cloudflare Worker)</h4>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <input id="apiUrlInput" placeholder="https://your-worker.workers.dev" />
+          <div class="row">
+            <select id="pollIntervalSel" style="flex:1;">
+              <option value="60000">Раз в 1 мин</option>
+              <option value="300000" selected>Раз в 5 мин</option>
+              <option value="0">Вручную</option>
+            </select>
+            <button id="saveApiBtn" class="sec">OK</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>📝 Лог изменений (Diff)</h4>
+        <div class="log" id="diffLog"></div>
+      </div>
+    </aside>
+
+    <div class="legend">
+      <div><span class="dot" style="background:#ef4444"></span>Отключено (код 2)</div>
+      <div><span class="dot" style="background:#f97316"></span>Переключение ±30 мин (коды 1, 3)</div>
+      <div><span class="dot" style="background:#eab308"></span>Возможно отключение (код 4)</div>
+      <div><span class="dot" style="background:#a855f7"></span>2 очереди: 1 откл / 1 вкл (подъезды)</div>
+      <div><span class="dot" style="background:#38bdf8"></span>Квартиры откл., лифты работают</div>
+      <div><span class="dot" style="background:#22c55e"></span>Свет есть (код 0)</div>
+      <div><span class="dot" style="background:#64748b"></span>Не привязано к фидеру</div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const SUBQUEUES = ['1-1','1-2','2-1','2-2','3-1','3-2','4-1','4-2','5-1','5-2','6-1','6-2'];
+    const fmtQ = q => q.replace('-1', '-І').replace('-2', '-ІІ');
+    const CODE_MAP = { '0': 'on', '1': 'switch_off', '2': 'off', '3': 'switch_on', '4': 'possible' };
+
+    // Словарь сокращений и переименований улиц (OSM + Google <-> ДПЕМ)
+    const STREET_ALIASES = {
+      'дружби народів': 'європейська',
+      'дружбы народов': 'європейська',
+      'курчатова': 'мрій',
+      'леніна': 'незалежності',
+      'набер. енергетіків': 'набережна енергетиків',
+      'набережна енергетіків': 'набережна енергетиків',
+      'проспект незалежності': 'незалежності',
+      'пр-т незалежності': 'незалежності',
+      'пр. незалежності': 'незалежності',
+      'пр-кт незалежності': 'незалежності'
+    };
+
+    function normalizeStreet(s = '') {
+      let c = s.toLowerCase()
+        .replace(/вулиця|вул\.|проспект|пр-кт|пр-т|пр\.|бульвар|б-вар\.?|б-р\.?|бул\.|смт\.?/gi, '')
+        .replace(/\s+/g, ' ').trim();
+      for (const [alias, canon] of Object.entries(STREET_ALIASES)) {
+        if (c.includes(alias)) return canon;
+      }
+      return c;
+    }
+
+    // Демо-данные на 2026-11-22 (совпадают с вашим фрагментом на случай открытия без файла)
+    let scheduleByDate = {
+      '2026-11-22': {
+        savedAt: '2026-11-22 15:31:34 (встроенный снимок)',
+        queues: {
+          '1-1': Array.from({length:48}, (_,i)=> i<3?'possible': i===37?'switch_off': (i>=38&&i<=43)?'off': i===44?'switch_on':'on'),
+          '1-2': Array.from({length:48}, (_,i)=> i<3?'possible': i===37?'switch_off': (i>=38&&i<=43)?'off': i===44?'switch_on':'on'),
+          '2-1': Array.from({length:48}, (_,i)=> (i>=2&&i<=9)?'possible': i===44?'switch_off': (i>=45)?'off':'on'),
+          '2-2': Array.from({length:48}, (_,i)=> (i>=2&&i<=9)?'possible': i===44?'switch_off': (i>=45)?'off':'on'),
+          '3-1': Array.from({length:48}, (_,i)=> (i>=9&&i<=16)?'possible':'on'),
+          '3-2': Array.from({length:48}, (_,i)=> (i>=9&&i<=16)?'possible':'on'),
+          '4-1': Array.from({length:48}, (_,i)=> (i>=16&&i<=23)?'possible':'on'),
+          '4-2': Array.from({length:48}, (_,i)=> (i>=16&&i<=23)?'possible':'on'),
+          '5-1': Array.from({length:48}, (_,i)=> (i>=23&&i<=30)?'possible':'on'),
+          '5-2': Array.from({length:48}, (_,i)=> (i>=23&&i<=30)?'possible':'on'),
+          '6-1': Array.from({length:48}, (_,i)=> i===36?'possible': i===37?'switch_off': (i>=38&&i<=42)?'off': i===43?'switch_on':'on'),
+          '6-2': Array.from({length:48}, (_,i)=> i===36?'possible': i===37?'switch_off': (i>=38&&i<=42)?'off': i===43?'switch_on':'on')
+        }
+      }
+    };
+
+    // Индекс привязки адресов: Map<"улица|дом", Array<{queue, feeder, substation, switchType}>>
+    let addressIndex = new Map();
+    let streetWildcardIndex = new Map(); // Для улиц МПЗ без номеров домов ("Степова", "Садова"...)
+    let transfers = JSON.parse(localStorage.getItem('dpem_transfers') || '[]');
+    let userOverrides = JSON.parse(localStorage.getItem('dpem_overrides') || '{}');
+    let myHomeKey = localStorage.getItem('dpem_my_home') || null;
+    let apiUrl = localStorage.getItem('dpem_api_url') || '';
+
+    let selectedQueue = null;
+    let selectedFeeder = '';
+    const buildings = [];
+    const lastVisualHash = new Map();
+
+    const map = L.map('map').setView([47.82532, 31.16650], 14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    function logDiff(msg) {
+      const box = document.getElementById('diffLog');
+      const div = document.createElement('div');
+      div.innerHTML = `<span style="color:#64748b">[${new Date().toLocaleTimeString('uk-UA')}]</span> ${msg}`;
+      box.prepend(div);
+      while (box.children.length > 45) box.lastChild.remove();
+    }
+
+    // === ПАРСЕР РЕАЛЬНОГО HTML off_graf.html ===
+    function expandHouseTokens(str) {
+      const tokens = [];
+      for (let raw of str.split(',')) {
+        raw = raw.replace(/\(.*?\)/g, '').replace(/^[–—\-]+/, '').trim().toUpperCase();
+        if (!raw) continue;
+        const rng = raw.match(/^(\d+)[–—\-](\d+)$/);
+        if (rng) {
+          const a = Number(rng[1]), b = Number(rng[2]);
+          if (b > a && b - a <= 20) {
+            for (let k = a; k <= b; k++) tokens.push(String(k));
+            continue;
+          }
+        }
+        tokens.push(raw);
+      }
+      return tokens;
+    }
+
+    function indexFeederRows(feederRows) {
+      addressIndex.clear();
+      streetWildcardIndex.clear();
+      const feedersSet = new Set();
+
+      for (const row of feederRows) {
+        feedersSet.add(row.feeder);
+        const lines = row.consumersText.split(/[\n;]+/);
+        for (let line of lines) {
+          line = line.replace(/ЧАСТКОВО:|ЧАСТИНОВО:/gi, '').trim();
+          if (!line) continue;
+          // Ищем улицу + номера домов в конце строки
+          const m = line.match(/^(?:вул\.|пр-т|пр-кт|пр\.|б-р\.?|бул\.)?\s*([А-ЯІЇЄҐа-яіїєґ'\.\-\s]{3,}?)\s+([0-9][0-9А-ЯІЇЄА-Za-z\/\-–,\s]*)$/);
+          if (m) {
+            const st = normalizeStreet(m[1]);
+            const houses = expandHouseTokens(m[2]);
+            for (const h of houses) {
+              const key = `${st}|${h}`;
+              if (!addressIndex.has(key)) addressIndex.set(key, []);
+              const arr = addressIndex.get(key);
+              if (!arr.some(x => x.queue === row.queue && x.feeder === row.feeder)) {
+                arr.push({ queue: row.queue, feeder: row.feeder, substation: row.substation, switchType: row.switchType });
+              }
+            }
+          } else if (/вул\.|пров\./i.test(line)) {
+            // Улица без номеров (например МПЗ или Костянтинівка)
+            const st = normalizeStreet(line);
+            if (st.length >= 3) {
+              if (!streetWildcardIndex.has(st)) streetWildcardIndex.set(st, []);
+              streetWildcardIndex.get(st).push({ queue: row.queue, feeder: row.feeder, substation: row.substation });
+            }
+          }
+        }
+      }
+
+      // Обновляем список фидеров
+      const fSel = document.getElementById('feederFilter');
+      fSel.innerHTML = '<option value="">Все подстанции/фидеры</option>';
+      [...feedersSet].sort().forEach(f => {
+        const o = document.createElement('option'); o.value = f; o.textContent = f; fSel.appendChild(o);
+      });
+
+      // Подсчитываем статистику дублей (2+ очереди)
+      let dualCount = 0;
+      for (const arr of addressIndex.values()) {
+        const uniqQueues = new Set(arr.map(x => x.queue));
+        if (uniqQueues.size > 1) dualCount++;
+      }
+      document.getElementById('statsBody').innerHTML =
+        `Уникальных адресов в таблице ДПЕМ: <b>${addressIndex.size}</b><br>` +
+        `Улиц списком (МПЗ/села): <b>${streetWildcardIndex.size}</b><br>` +
+        `Домов сразу в 2+ очередях: <b style="color:#c084fc">${dualCount}</b>`;
+    }
+
+    function parseFullGrafHtmlAndApply(html) {
+      const recMatch = html.match(/records\s*=\s*(\[\s*\{[\s\S]*?\}\s*\])\s*;/);
+      if (!recMatch) return alert('Не найден массив records в HTML!');
+      const rawRecords = JSON.parse(recMatch[1]);
+
+      scheduleByDate = {};
+      for (const rec of rawRecords) {
+        const queues = {};
+        SUBQUEUES.forEach((q, qIdx) => {
+          queues[q] = rec.data.slice(qIdx * 48, (qIdx + 1) * 48).map(v => CODE_MAP[v] || 'on');
+        });
+        scheduleByDate[rec.date] = { savedAt: rec.saved_at, queues };
+      }
+
+      const feederRows = [];
+      for (let i = 1; i <= 12; i++) {
+        const startIdx = html.indexOf(`id="cherga-${i}"`);
+        if (startIdx === -1) continue;
+        const endIdx = i < 12 ? html.indexOf(`id="cherga-${i + 1}"`, startIdx) : html.indexOf('class="content-container"', startIdx);
+        const chunk = html.slice(startIdx, endIdx > startIdx ? endIdx : undefined);
+        const queue = SUBQUEUES[i - 1];
+        const trs = chunk.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+        for (const tr of trs) {
+          const tds = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => m[1]);
+          if (tds.length !== 5) continue;
+          const clean = s => s.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+            .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, ' ').trim();
+          const settlement = clean(tds[0]);
+          if (/Найменування/i.test(settlement)) continue;
+          const substation = clean(tds[1]).replace(/ПС-35\/10\s*кВ\s*/i, '');
+          const feeder = clean(tds[2]);
+          feederRows.push({
+            queue, settlement, substation, feeder: `${substation} Ф-${feeder}`,
+            switchType: clean(tds[3]), consumersText: clean(tds[4])
+          });
+        }
+      }
+
+      indexFeederRows(feederRows);
+      rebuildDateSelect();
+      document.getElementById('pollStatus').textContent =
+        `HTML загружен: ${Object.keys(scheduleByDate).length} дат | ${addressIndex.size} адресов`;
+      applyDiffRender('Загружен реальный HTML');
+    }
+
+    function rebuildDateSelect() {
+      const sel = document.getElementById('dateSelect');
+      const prev = sel.value;
+      sel.innerHTML = '';
+      Object.keys(scheduleByDate).sort().reverse().forEach(dt => {
+        const o = document.createElement('option');
+        o.value = dt;
+        o.textContent = `${dt} (${scheduleByDate[dt].savedAt?.slice(11,16) || ''})`;
+        sel.appendChild(o);
+      });
+      if (prev && scheduleByDate[prev]) sel.value = prev;
+    }
+
+    // === РАЗРЕШЕНИЕ ОЧЕРЕДЕЙ И ПЕРЕНОСОВ ДЛЯ ДОМА ===
+    function resolveBuilding(street, house) {
+      const st = normalizeStreet(street);
+      const hn = house.trim().toUpperCase();
+      const key = `${st}|${hn}`;
+
+      let entries = addressIndex.get(key) || [];
+      if (!entries.length && streetWildcardIndex.has(st)) {
+        entries = streetWildcardIndex.get(st);
+      }
+
+      const ov = userOverrides[key] || {};
+      const tr = transfers.find(t => normalizeStreet(t.street) === st && t.houses.includes(hn));
+
+      if (!entries.length && !tr && !ov.primary) return null;
+
+      // Разделяем уникальные очереди
+      const uniqueQueues = [...new Set(entries.map(e => e.queue))];
+      let primary = ov.primary || uniqueQueues[0] || tr?.targetQueue;
+      let secondary = ov.secondary || uniqueQueues[1] || null;
+      let dualType = ov.dualType || (secondary ? 'split_entrances' : 'none');
+      let feeder = entries.map(e => `${fmtQ(e.queue)}: ${e.feeder}`).join(' | ');
+      let transferredFrom = null;
+
+      if (tr) {
+        transferredFrom = primary ? `${fmtQ(primary)} (${feeder})` : 'нет привязки';
+        primary = tr.targetQueue;
+        feeder = tr.targetFeeder ? `${fmtQ(tr.targetQueue)}: ${tr.targetFeeder}` : `${fmtQ(tr.targetQueue)} (перенос)`;
+      }
+
+      return { key, primary, secondary, dualType, feeder, entries, transferredFrom, isTransferred: !!tr };
+    }
+
+    function stateColor(st) {
+      if (st === 'off') return '#ef4444';
+      if (st === 'switch_off' || st === 'switch_on') return '#f97316';
+      if (st === 'possible') return '#eab308';
+      return '#22c55e';
+    }
+
+    function computeBuildingVisual(b, queuesMap, slot, dualMode) {
+      const info = resolveBuilding(b.street, b.house);
+      if (!info) return { color: '#64748b', opacity: 0.20, statusText: 'Нет в таблице ДПЕМ', info: null };
+
+      if (selectedQueue && info.primary !== selectedQueue && info.secondary !== selectedQueue) {
+        return { color: '#334155', opacity: 0.16, statusText: 'Скрыто фильтром', info };
+      }
+      if (selectedFeeder && !info.feeder.includes(selectedFeeder)) {
+        return { color: '#334155', opacity: 0.16, statusText: 'Другой фидер', info };
+      }
+
+      const s1 = queuesMap[info.primary]?.[slot] || 'on';
+      const s2 = info.secondary ? (queuesMap[info.secondary]?.[slot] || 'on') : null;
+      const isOff = s => s === 'off' || s === 'switch_off' || s === 'switch_on';
+
+      let color = stateColor(s1);
+      let statusText = s1 === 'off' ? 'Отключено' : s1 === 'possible' ? 'Возможно отключение' : s1.startsWith('switch') ? 'Переключение (±30 мин)' : 'Свет есть';
+
+      if (s2 && dualMode === 'split' && info.dualType !== 'backup') {
+        if (isOff(s1) && isOff(s2)) {
+          color = '#ef4444'; statusText = 'Отключены обе очереди';
+        } else if (info.dualType === 'split_lifts' && isOff(s1) && !isOff(s2)) {
+          color = '#38bdf8'; statusText = 'Квартиры откл., лифты работают';
+        } else if (isOff(s1) !== isOff(s2)) {
+          color = '#a855f7'; statusText = 'Частично: 1 очередь откл. / 1 вкл.';
+        } else if (s1 === 'possible' || s2 === 'possible') {
+          color = '#eab308'; statusText = 'Возможно отключение';
+        }
+      }
+
+      return { color, opacity: 0.68, dash: info.isTransferred ? '5,5' : null, statusText, info, s1, s2 };
+    }
+
+    // === DIFF-ПЕРЕРИСОВКА (ТОЛЬКО ИЗМЕНИВШИЕСЯ ЗДАНИЯ) ===
+    function applyDiffRender(reason = 'Обновление') {
+      const date = document.getElementById('dateSelect').value;
+      const slot = Number(document.getElementById('timeSlider').value);
+      const dualMode = document.getElementById('dualMode').value;
+      const queuesMap = scheduleByDate[date]?.queues || {};
+
+      const m1 = slot * 30, m2 = m1 + 30;
+      const pad = n => String(n).padStart(2, '0');
+      document.getElementById('timeLabel').textContent = `${pad(Math.floor(m1/60))}:${pad(m1%60)} – ${pad(Math.floor(m2/60))}:${pad(m2%60)}`;
+      renderQueuePills(queuesMap, slot);
+
+      let repainted = 0;
+      for (const b of buildings) {
+        const vis = computeBuildingVisual(b, queuesMap, slot, dualMode);
+        const vKey = `${vis.color}|${vis.opacity}|${vis.dash || ''}|${vis.statusText}|${vis.info?.feeder || ''}`;
+        if (lastVisualHash.get(b.id) === vKey) continue;
+
+        lastVisualHash.set(b.id, vKey);
+        repainted++;
+        b.layer.setStyle({
+          color: b.key === myHomeKey ? '#ffffff' : vis.color,
+          weight: b.key === myHomeKey ? 3 : 1,
+          fillColor: vis.color,
+          fillOpacity: vis.opacity,
+          dashArray: vis.dash
+        });
+        b.currentVisual = vis;
+      }
+
+      if (repainted > 0) logDiff(`<b>${reason}:</b> перекрашено <b>${repainted}</b> из ${buildings.length} зданий`);
+      else logDiff(`${reason}: изменений нет`);
+      updateMyHomeWidget(queuesMap, slot);
+    }
+
+    function renderQueuePills(queuesMap, slot) {
+      const box = document.getElementById('queuePills');
+      box.innerHTML = '';
+      SUBQUEUES.forEach(q => {
+        const st = queuesMap[q]?.[slot] || 'on';
+        const el = document.createElement('div');
+        el.className = `pill ${st} ${selectedQueue === q ? 'active' : ''}`;
+        el.textContent = fmtQ(q);
+        el.onclick = () => { selectedQueue = selectedQueue === q ? null : q; applyDiffRender('Фильтр очереди'); };
+        box.appendChild(el);
+      });
+    }
+
+    function updateMyHomeWidget(queuesMap, slot) {
+      const body = document.getElementById('myHomeBody');
+      const clrBtn = document.getElementById('clearHomeBtn');
+      if (!myHomeKey) {
+        clrBtn.style.display = 'none';
+        body.innerHTML = 'Кликните по зданию на карте и нажмите «Сделать моим домом».';
+        return;
+      }
+      clrBtn.style.display = 'inline-block';
+      const b = buildings.find(x => x.key === myHomeKey);
+      if (!b) return;
+      const info = resolveBuilding(b.street, b.house);
+      if (!info) { body.innerHTML = `<b>${b.street}, ${b.house}</b><br>Нет привязки.`; return; }
+
+      const arr = queuesMap[info.primary] || [];
+      const cur = arr[slot] || 'on';
+      let nextIdx = null;
+      for (let i = slot + 1; i < 48; i++) {
+        if ((arr[i] || 'on') !== cur) { nextIdx = i - slot; break; }
+      }
+      const mins = nextIdx ? nextIdx * 30 : null;
+      body.innerHTML = `
+        <b>${b.street}, ${b.house}</b><br>
+        Основная: <b>${fmtQ(info.primary)}</b> ${info.secondary ? `| 2-я: <b>${fmtQ(info.secondary)}</b>` : ''}<br>
+        <small>${info.feeder}</small><br>
+        Смена статуса: <b style="color:var(--accent)">${mins ? `через ~${Math.floor(mins/60)} ч ${mins%60} мин` : 'без изменений до 24:00'}</b>
+      `;
+    }
+
+    function openBuildingPopup(b) {
+      const vis = b.currentVisual || {};
+      const info = vis.info;
+      const div = document.createElement('div');
+      div.style.minWidth = '235px';
+      div.innerHTML = `
+        <b>${b.street || 'Без улицы'}, ${b.house}</b><br>
+        Статус: <b>${vis.statusText || '—'}</b><br>
+        ${info ? `Очереди: <b>${fmtQ(info.primary)}</b>${info.secondary ? ` и <b>${fmtQ(info.secondary)}</b>` : ''}<br><small>${info.feeder}</small><br>` : ''}
+        ${info?.isTransferred ? `<div style="color:#d97706"><b>Перенос с:</b> ${info.transferredFrom}</div>` : ''}
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">
+          <button id="bHome" style="padding:4px 8px;">🏠 Сделать моим домом</button>
+          <select id="bDual" style="padding:4px;">
+            <option value="">Уточнить 2 очереди для дома...</option>
+            <option value="backup">Основная + резерв (1 ввод)</option>
+            <option value="split_entrances">Половина подъездов</option>
+            <option value="split_lifts">Квартиры откл., лифты работают</option>
+          </select>
+          ${info?.secondary ? `<button id="bSwap" class="sec" style="padding:4px 8px;">⇄ Сделать ${fmtQ(info.secondary)} основной</button>` : ''}
+          <button id="bTrans" style="padding:4px 8px;background:#b45309;border-color:#d97706;">🔀 Перенести на другой фидер</button>
+        </div>
+      `;
+      div.querySelector('#bHome').onclick = () => {
+        myHomeKey = b.key; localStorage.setItem('dpem_my_home', myHomeKey);
+        lastVisualHash.clear(); applyDiffRender('Выбран Мой дом'); b.layer.closePopup();
+      };
+      div.querySelector('#bDual').onchange = (e) => {
+        if (!e.target.value) return;
+        userOverrides[b.key] = { ...(userOverrides[b.key] || {}), dualType: e.target.value };
+        localStorage.setItem('dpem_overrides', JSON.stringify(userOverrides));
+        applyDiffRender('Уточнён тип 2 очередей'); b.layer.closePopup();
+      };
+      const swapBtn = div.querySelector('#bSwap');
+      if (swapBtn) {
+        swapBtn.onclick = () => {
+          userOverrides[b.key] = { ...(userOverrides[b.key] || {}), primary: info.secondary, secondary: info.primary };
+          localStorage.setItem('dpem_overrides', JSON.stringify(userOverrides));
+          applyDiffRender('Смена основной очереди'); b.layer.closePopup();
+        };
+      }
+      div.querySelector('#bTrans').onclick = () => {
+        document.getElementById('trStreet').value = normalizeStreet(b.street);
+        document.getElementById('trHouses').value = b.house;
+        b.layer.closePopup();
+      };
+      b.layer.bindPopup(div).openPopup();
+    }
+
+    async function loadOSM() {
+      document.getElementById('pollStatus').textContent = 'Загрузка контуров зданий OpenStreetMap...';
+      const query = `[out:json][timeout:30];
+        (way["building"]["addr:housenumber"](47.805,31.135,47.845,31.205);
+         way["power"="substation"](47.805,31.135,47.845,31.205););
+        out body; >; out skel qt;`;
+      const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+      const osm = await res.json();
+      const nodes = {};
+      osm.elements.filter(e => e.type === 'node').forEach(n => nodes[n.id] = [n.lat, n.lon]);
+
+      osm.elements.filter(e => e.type === 'way').forEach(w => {
+        const coords = w.nodes.map(id => nodes[id]).filter(Boolean);
+        if (coords.length < 3) return;
+        if (w.tags?.power === 'substation') {
+          L.polygon(coords, { color: '#eab308', weight: 2, fillOpacity: 0.25 })
+            .bindPopup(`⚡ Подстанция: <b>${w.tags.name || 'ТП/ПС'}</b>`).addTo(map);
+          return;
+        }
+        const street = w.tags?.['addr:street'] || '';
+        const house = w.tags?.['addr:housenumber'] || '';
+        const key = `${normalizeStreet(street)}|${house.trim().toUpperCase()}`;
+        const poly = L.polygon(coords).addTo(map);
+        const rec = { id: `osm_${w.id}`, key, street, house, layer: poly };
+        poly.on('click', () => openBuildingPopup(rec));
+        buildings.push(rec);
+      });
+      document.getElementById('pollStatus').textContent = `OSM загружен (${buildings.length} зданий). Нажмите «Загрузить HTML файл» для полного списка очередей.`;
+      applyDiffRender('Загружен OSM');
+    }
+
+    async function pollApiNow() {
+      if (!apiUrl) { applyDiffRender('Локальный опрос'); return; }
+      try {
+        const r = await fetch(apiUrl);
+        const data = await r.json();
+        if (data.scheduleByDate) scheduleByDate = data.scheduleByDate;
+        if (data.feederRows) indexFeederRows(data.feederRows);
+        rebuildDateSelect();
+        document.getElementById('pollStatus').textContent = `Live API OK (${data.operUpdatedAt || new Date().toLocaleTimeString('uk-UA')})`;
+        applyDiffRender('Опрос Live API');
+      } catch {
+        document.getElementById('pollStatus').textContent = 'Ошибка соединения с Worker API';
+      }
+    }
+
+    // Поиск, файл, переносы и таймеры
+    document.getElementById('htmlFileInput').onchange = async (e) => {
+      const f = e.target.files?.[0];
+      if (f) parseFullGrafHtmlAndApply(await f.text());
+    };
+
+    document.getElementById('addrSearch').oninput = (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      const box = document.getElementById('searchResults');
+      if (q.length < 2) { box.style.display = 'none'; return; }
+      const m = buildings.filter(b => `${b.street} ${b.house}`.toLowerCase().includes(q)).slice(0, 12);
+      box.innerHTML = '';
+      m.forEach(b => {
+        const d = document.createElement('div'); d.textContent = `${b.street}, ${b.house}`;
+        d.onclick = () => {
+          box.style.display = 'none';
+          map.setView(b.layer.getBounds().getCenter(), 17);
+          openBuildingPopup(b);
+        };
+        box.appendChild(d);
+      });
+      box.style.display = m.length ? 'block' : 'none';
+    };
+
+    function renderTransfers() {
+      const box = document.getElementById('transfersList');
+      if (!transfers.length) { box.textContent = 'Активных переносов нет'; return; }
+      box.innerHTML = '';
+      transfers.forEach((t, i) => {
+        const d = document.createElement('div');
+        d.innerHTML = `• <b>${t.street}</b> (${t.houses.join(', ')}) → <b>${fmtQ(t.targetQueue)}</b> <a href="#" style="color:#f87171">[×]</a>`;
+        d.querySelector('a').onclick = ev => {
+          ev.preventDefault(); transfers.splice(i, 1);
+          localStorage.setItem('dpem_transfers', JSON.stringify(transfers));
+          renderTransfers(); applyDiffRender('Отмена переноса');
+        };
+        box.appendChild(d);
+      });
+    }
+
+    document.getElementById('addTransferBtn').onclick = () => {
+      const street = document.getElementById('trStreet').value.trim();
+      const houses = document.getElementById('trHouses').value.split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+      const targetQueue = document.getElementById('trTargetQueue').value;
+      const targetFeeder = document.getElementById('trTargetFeeder').value.trim();
+      if (!street || !houses.length) return alert('Укажите улицу и дома');
+      transfers.push({ street, houses, targetQueue, targetFeeder, manual: true });
+      localStorage.setItem('dpem_transfers', JSON.stringify(transfers));
+      renderTransfers(); applyDiffRender(`Перенос ${street} → ${fmtQ(targetQueue)}`);
+    };
+
+    SUBQUEUES.forEach(q => {
+      const o = document.createElement('option'); o.value = q; o.textContent = `Черга ${fmtQ(q)}`;
+      document.getElementById('trTargetQueue').appendChild(o);
+    });
+    rebuildDateSelect();
+    renderTransfers();
+    document.getElementById('apiUrlInput').value = apiUrl;
+    document.getElementById('saveApiBtn').onclick = () => {
+      apiUrl = document.getElementById('apiUrlInput').value.trim();
+      localStorage.setItem('dpem_api_url', apiUrl);
+      pollApiNow();
+    };
+    document.getElementById('pollNowBtn').onclick = pollApiNow;
+    document.getElementById('timeSlider').oninput = () => applyDiffRender('Ползунок времени');
+    document.getElementById('dateSelect').onchange = () => applyDiffRender('Выбор даты');
+    document.getElementById('dualMode').onchange = () => applyDiffRender('Режим 2 очередей');
+    document.getElementById('feederFilter').onchange = e => { selectedFeeder = e.target.value; applyDiffRender('Фильтр фидера'); };
+    document.getElementById('resetFilterBtn').onclick = () => {
+      selectedQueue = null; selectedFeeder = ''; document.getElementById('feederFilter').value = '';
+      applyDiffRender('Сброс фильтров');
+    };
+    document.getElementById('clearHomeBtn').onclick = () => {
+      myHomeKey = null; localStorage.removeItem('dpem_my_home');
+      lastVisualHash.clear(); applyDiffRender('Сброс Моего дома');
+    };
+    document.getElementById('nowBtn').onclick = () => {
+      const d = new Date();
+      document.getElementById('timeSlider').value = d.getHours() * 2 + (d.getMinutes() >= 30 ? 1 : 0);
+      applyDiffRender('Сейчас');
+    };
+    let playT = null;
+    document.getElementById('playBtn').onclick = e => {
+      if (playT) { clearInterval(playT); playT = null; e.target.textContent = '▶ День'; }
+      else {
+        e.target.textContent = '⏸ Пауза';
+        playT = setInterval(() => {
+          const s = document.getElementById('timeSlider');
+          s.value = (Number(s.value) + 1) % 48;
+          applyDiffRender('Автопрокрутка');
+        }, 650);
+      }
+    };
+    let pollT = setInterval(pollApiNow, 300000);
+    document.getElementById('pollIntervalSel').onchange = e => {
+      clearInterval(pollT); const ms = Number(e.target.value);
+      if (ms > 0) pollT = setInterval(pollApiNow, ms);
+    };
+
+    loadOSM();
+  </script>
+</body>
+</html>
