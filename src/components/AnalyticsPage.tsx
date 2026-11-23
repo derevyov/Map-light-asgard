@@ -1,19 +1,31 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Activity,
   ArrowLeft,
   BarChart3,
+  Clock,
   Flame,
   MapPin,
   RefreshCw,
   Search,
+  Sparkles,
+  Star,
   TrendingUp,
 } from 'lucide-react';
+import { CalendarDatePicker } from './CalendarDatePicker';
 import {
   AnalyticsWindow,
   ComputedOutageAnalytics,
   HotspotItem,
 } from '../lib/outageAnalytics';
-import { formatSubqueue, SubqueueId } from '../lib/types';
+import {
+  addDaysIso,
+  formatShiftSlotsUk,
+  resolveScheduleOrForecastForDate,
+  ScheduleShiftModel,
+} from '../lib/scheduleForecast';
+import { buildMergedIntervals, computeScheduleTotals } from '../lib/scheduleIntervals';
+import { formatSubqueue, SlotState, SUBQUEUES, SubqueueId } from '../lib/types';
 
 interface AnalyticsPageProps {
   analytics: ComputedOutageAnalytics;
@@ -26,6 +38,13 @@ interface AnalyticsPageProps {
   onBackToMap: () => void;
   onJumpToStreet: (streetName: string, buildingId?: string) => void;
   onOpenAuditModal: () => void;
+  availableDates: string[];
+  unifiedDays: Map<string, Record<SubqueueId, SlotState[]>>;
+  shiftModel: ScheduleShiftModel | null;
+  customShiftSlots: number | null;
+  onChangeCustomShiftSlots: (slots: number | null) => void;
+  onOpenDateInFavorites: (dateIso: string) => void;
+  onOpenDateOnMap: (dateIso: string) => void;
 }
 
 export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
@@ -39,11 +58,31 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   onBackToMap,
   onJumpToStreet,
   onOpenAuditModal,
+  availableDates,
+  unifiedDays,
+  shiftModel,
+  customShiftSlots,
+  onChangeCustomShiftSlots,
+  onOpenDateInFavorites,
+  onOpenDateOnMap,
 }) => {
   const [selectedQueue, setSelectedQueue] = useState<SubqueueId | null>(null);
   const [hoveredDayIdx, setHoveredDayIdx] = useState<number | null>(null);
   const [hotspotTab, setHotspotTab] = useState<'street' | 'zone'>('street');
   const [hotspotQuery, setHotspotQuery] = useState<string>('');
+  const anchorIso = shiftModel?.anchorDate || availableDates[0] || new Date().toISOString().slice(0, 10);
+  const [forecastTargetDate, setForecastTargetDate] = useState<string>(() => addDaysIso(anchorIso, 1));
+
+  const projectedDay = useMemo(
+    () =>
+      resolveScheduleOrForecastForDate(
+        forecastTargetDate,
+        unifiedDays,
+        shiftModel,
+        customShiftSlots
+      ),
+    [forecastTargetDate, unifiedDays, shiftModel, customShiftSlots]
+  );
 
   const maxQueueHours = useMemo(
     () => Math.max(1, ...analytics.unluckyQueues.map((q) => q.totalOffHours)),
@@ -449,6 +488,428 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
             </div>
           </section>
         </div>
+
+        {/* Calendar Shift-Based Future Forecast (1 day to 6 months ahead) */}
+        {shiftModel && projectedDay && (
+          <section className="rounded-lg border border-violet-200 dark:border-violet-900/60 bg-white dark:bg-[#111827] overflow-hidden">
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <h2 className="text-sm sm:text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-violet-600 dark:text-violet-400 shrink-0" />
+                  <span>Календарний прогноз за алгоритмом зміщення (на місяць+ вперед)</span>
+                </h2>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  {projectedDay.summaryUk}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <CalendarDatePicker
+                  selectedDate={forecastTargetDate}
+                  availableDates={availableDates}
+                  onSelectDate={setForecastTargetDate}
+                  allowForecast
+                  isForecastDate={projectedDay.isForecast}
+                  maxForecastDays={180}
+                />
+
+                <select
+                  value={customShiftSlots === null ? 'auto' : String(customShiftSlots)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onChangeCustomShiftSlots(v === 'auto' ? null : Number(v));
+                  }}
+                  aria-label="Крок добового зміщення"
+                  className="bg-slate-50 dark:bg-[#0b1120] border border-slate-300 dark:border-slate-700 rounded-md px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200 focus:outline-none focus:border-violet-500"
+                >
+                  <option value="auto">
+                    Авто ({formatShiftSlotsUk(shiftModel.dailyTimeShiftSlots)})
+                  </option>
+                  {[-8, -6, -4, -2, 0, 2, 4, 6, 8].map((s) => (
+                    <option key={s} value={String(s)}>
+                      {formatShiftSlotsUk(s)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-4">
+              {/* Quick Future Horizon Buttons + Open in Favorites / Map */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { label: 'Завтра', days: 1 },
+                    { label: '+3 дн.', days: 3 },
+                    { label: '+7 дн.', days: 7 },
+                    { label: '+14 дн.', days: 14 },
+                    { label: '+1 міс.', days: 30 },
+                    { label: '+2 міс.', days: 60 },
+                  ].map((preset) => {
+                    const iso = addDaysIso(anchorIso, preset.days);
+                    const isActive = forecastTargetDate === iso;
+                    return (
+                      <button
+                        key={preset.days}
+                        type="button"
+                        onClick={() => setForecastTargetDate(iso)}
+                        className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-colors whitespace-nowrap ${
+                          isActive
+                            ? 'bg-violet-600 border-violet-500 text-white'
+                            : 'bg-slate-50 dark:bg-[#0b1120] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-violet-400'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpenDateInFavorites(forecastTargetDate)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-800 dark:text-amber-300 text-xs font-semibold transition-colors whitespace-nowrap"
+                  >
+                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-500" />
+                    <span>Цей день в Обраних</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenDateOnMap(forecastTargetDate)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span>На карті</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 12-Queue x 24h Predicted Schedule Matrix */}
+              <div className="overflow-x-auto pb-1">
+                <div className="min-w-[560px] space-y-1.5">
+                  <div className="flex items-center gap-2 pl-12 pr-20 text-[10px] font-mono text-slate-400">
+                    <div className="flex-1 flex justify-between">
+                      <span>00:00</span>
+                      <span>06:00</span>
+                      <span>12:00</span>
+                      <span>18:00</span>
+                      <span>24:00</span>
+                    </div>
+                  </div>
+                  {SUBQUEUES.map((q) => {
+                    const slots = projectedDay.queues[q] || [];
+                    const segments = buildMergedIntervals(slots, includeSwitches);
+                    const totals = computeScheduleTotals(slots, includeSwitches);
+                    const offHours = Number((totals.offMin / 60).toFixed(1));
+                    const isSel = selectedQueue === q;
+
+                    return (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => setSelectedQueue(isSel ? null : q)}
+                        className={`w-full flex items-center gap-2 py-0.5 px-1 rounded transition-colors ${
+                          isSel
+                            ? 'bg-violet-50 dark:bg-violet-950/40 ring-1 ring-violet-500/60'
+                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                        }`}
+                      >
+                        <span className="w-10 text-left font-mono text-xs font-bold text-slate-800 dark:text-slate-200 shrink-0">
+                          {formatSubqueue(q)}
+                        </span>
+                        <div className="flex-1 h-5 rounded overflow-hidden flex border border-slate-200/80 dark:border-slate-800">
+                          {segments.map((seg, idx) => {
+                            const widthPct = ((seg.endSlot - seg.startSlot) / 48) * 100;
+                            const isOff = seg.state === 'off' || seg.state === 'switch_off';
+                            const isSw = seg.state === 'switch_on' || seg.state === 'possible';
+                            return (
+                              <div
+                                key={`${seg.startSlot}-${idx}`}
+                                style={{ width: `${widthPct}%` }}
+                                title={`${formatSubqueue(q)}: ${seg.startTime}–${seg.endTime} (${
+                                  isOff ? 'Без світла' : isSw ? 'Можливе / перемик.' : 'Світло'
+                                })`}
+                                className={`h-full flex items-center justify-center text-[9px] font-mono font-semibold overflow-hidden ${
+                                  isOff
+                                    ? 'bg-red-600/85 text-white'
+                                    : isSw
+                                    ? 'bg-amber-500/80 text-slate-950'
+                                    : 'bg-emerald-500/80 text-slate-950'
+                                }`}
+                              >
+                                {widthPct >= 14 ? `${seg.startTime}–${seg.endTime}` : ''}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <span className="w-16 text-right font-mono text-[11px] tabular-nums text-slate-600 dark:text-slate-300 shrink-0">
+                          {offHours} год
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Outage Patterns & Historical Forecast Section (12x24h Heatmap + Cycle Insights) */}
+        <section className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] overflow-hidden">
+          {(() => {
+            const activePatternQueue: SubqueueId =
+              selectedQueue || analytics.mostUnlucky?.queue || '1-1';
+            const pattern = analytics.queuePatterns[activePatternQueue];
+            const slotDays = analytics.daysWithSlotHistory;
+            const confidenceLabel =
+              slotDays >= 7
+                ? `Стійка статистика (${slotDays} дн.)`
+                : slotDays >= 3
+                ? `Попередні закономірності (${slotDays} дн.)`
+                : `Початковий збір (${slotDays} дн. — точнішає щодня)`;
+
+            const cellBg = (pct: number) => {
+              if (pct >= 75) return 'bg-red-600/90 text-white';
+              if (pct >= 50) return 'bg-red-500/70 text-white';
+              if (pct >= 25) return 'bg-amber-500/70 text-slate-950 dark:text-white';
+              if (pct > 0) return 'bg-emerald-500/35 text-emerald-900 dark:text-emerald-200';
+              return 'bg-slate-100 dark:bg-slate-800/70 text-slate-400';
+            };
+
+            return (
+              <>
+                <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm sm:text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                      <span>Закономірності та прогноз ризику по чергах (за минулими відключеннями)</span>
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Теплова карта ймовірності відключень по годинах доби (00:00–24:00) · натисніть на рядок черги для деталей
+                    </p>
+                  </div>
+                  <div className="text-[11px] font-mono px-2.5 py-1 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0b1120] text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                    {confidenceLabel}
+                  </div>
+                </div>
+
+                {slotDays === 0 ? (
+                  <div className="p-6 text-center text-xs sm:text-sm text-slate-500 dark:text-slate-400">
+                    Погодинний архів ще накопичується. Після завантаження графіків ДПЕМ тут автоматично зʼявиться карта закономірностей.
+                  </div>
+                ) : (
+                  <div className="p-4 sm:p-5 space-y-5">
+                    {/* 12x24h Heatmap */}
+                    <div className="overflow-x-auto pb-1">
+                      <div className="min-w-[640px]">
+                        <div className="flex items-center gap-1 mb-1.5 pl-14 pr-1 text-[10px] font-mono text-slate-400">
+                          {Array.from({ length: 24 }, (_, h) => (
+                            <div key={h} className="flex-1 text-center tabular-nums">
+                              {h % 2 === 0 ? String(h).padStart(2, '0') : ''}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="space-y-1">
+                          {SUBQUEUES.map((q) => {
+                            const qp = analytics.queuePatterns[q];
+                            const isSel = activePatternQueue === q;
+                            return (
+                              <button
+                                key={q}
+                                type="button"
+                                onClick={() => setSelectedQueue(q)}
+                                className={`w-full flex items-center gap-1 py-0.5 px-1 rounded transition-colors ${
+                                  isSel
+                                    ? 'bg-sky-50 dark:bg-sky-950/50 ring-1 ring-sky-500/60'
+                                    : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                                }`}
+                              >
+                                <span
+                                  className={`w-12 text-left font-mono text-xs font-bold shrink-0 ${
+                                    isSel
+                                      ? 'text-sky-600 dark:text-sky-400'
+                                      : 'text-slate-700 dark:text-slate-300'
+                                  }`}
+                                >
+                                  {formatSubqueue(q)}
+                                </span>
+                                <div className="flex-1 grid grid-cols-24 gap-[2px]">
+                                  {qp.hourlyRiskPct.map((pct, h) => (
+                                    <div
+                                      key={h}
+                                      title={`Черга ${formatSubqueue(q)} · ${String(h).padStart(2, '0')}:00–${String(h + 1).padStart(2, '0')}:00 · ймовірність відключення: ${pct}%`}
+                                      className={`h-5 rounded-[2px] flex items-center justify-center text-[9px] font-mono tabular-nums ${cellBg(
+                                        pct
+                                      )}`}
+                                    >
+                                      {pct >= 50 ? `${pct}` : ''}
+                                    </div>
+                                  ))}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                          <span>Архів зберігається у хмарі та не обнуляється після оновлень.</span>
+                          <div className="flex items-center gap-3">
+                            <span className="inline-flex items-center gap-1">
+                              <span className="w-2.5 h-2.5 rounded-[2px] bg-slate-200 dark:bg-slate-700" />
+                              0%
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <span className="w-2.5 h-2.5 rounded-[2px] bg-emerald-500/45" />
+                              1–24%
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <span className="w-2.5 h-2.5 rounded-[2px] bg-amber-500/80" />
+                              25–49%
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <span className="w-2.5 h-2.5 rounded-[2px] bg-red-600" />
+                              50–100%
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Selected Queue Pattern Breakdown + 12h Risk Outlook */}
+                    {pattern && (
+                      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-3 border-t border-slate-100 dark:border-slate-800">
+                        {/* Left: Cycle Stats & Peak/Safest Windows */}
+                        <div className="lg:col-span-6 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <h3 className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white">
+                              Профіль закономірностей: черга{' '}
+                              <span className="font-mono text-sky-600 dark:text-sky-400">
+                                {formatSubqueue(activePatternQueue)}
+                              </span>
+                            </h3>
+                            <span className="text-[11px] font-mono text-slate-400">
+                              База: {pattern.daysWithSlots} дн.
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="p-2.5 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0b1120]">
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                Типовий блок без світла
+                              </div>
+                              <div className="mt-1 font-mono text-base font-bold text-red-600 dark:text-red-400 tabular-nums">
+                                {pattern.avgBlockHours > 0 ? `${pattern.avgBlockHours} год` : '—'}
+                              </div>
+                            </div>
+                            <div className="p-2.5 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0b1120]">
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                Пауза зі світлом
+                              </div>
+                              <div className="mt-1 font-mono text-base font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                                {pattern.avgLightGapHours > 0 ? `${pattern.avgLightGapHours} год` : '—'}
+                              </div>
+                            </div>
+                            <div className="p-2.5 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0b1120]">
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                Відключень / добу
+                              </div>
+                              <div className="mt-1 font-mono text-base font-bold text-slate-900 dark:text-white tabular-nums">
+                                {pattern.avgOutagesPerDay}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                            <div className="p-2.5 rounded-md border border-red-200/70 dark:border-red-900/50 bg-red-50/50 dark:bg-red-950/20">
+                              <div className="text-[11px] font-semibold text-red-700 dark:text-red-300 mb-1">
+                                Пікові години ризику
+                              </div>
+                              {pattern.peakWindows.length > 0 ? (
+                                <div className="space-y-0.5 font-mono text-[11px] text-slate-800 dark:text-slate-200">
+                                  {pattern.peakWindows.map((w) => (
+                                    <div key={w.label} className="flex justify-between">
+                                      <span>{w.label}</span>
+                                      <span className="font-semibold text-red-600 dark:text-red-400">
+                                        {w.avgPct}%
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="text-[11px] text-slate-400">
+                                  Відключень не зафіксовано
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="p-2.5 rounded-md border border-emerald-200/70 dark:border-emerald-900/50 bg-emerald-50/50 dark:bg-emerald-950/20">
+                              <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 mb-1">
+                                Найстабільніші вікна
+                              </div>
+                              {pattern.safestWindows.length > 0 ? (
+                                <div className="space-y-0.5 font-mono text-[11px] text-slate-800 dark:text-slate-200">
+                                  {pattern.safestWindows.map((w) => (
+                                    <div key={w.label} className="flex justify-between">
+                                      <span>{w.label}</span>
+                                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                                        {w.avgPct}%
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="text-[11px] text-slate-400">Недостатньо даних</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: Next 12 Hours Risk Outlook */}
+                        <div className="lg:col-span-6 p-3.5 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0b1120] flex flex-col justify-between space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5 text-amber-500" />
+                              <span>Орієнтовний прогноз ризику (наступні 12 год)</span>
+                            </div>
+                            <span className="font-mono text-[11px] text-sky-600 dark:text-sky-400 font-semibold">
+                              {formatSubqueue(activePatternQueue)}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-6 sm:grid-cols-12 gap-1.5">
+                            {pattern.upcomingHours.map((item, idx) => (
+                              <div
+                                key={`${item.hour}-${idx}`}
+                                className={`p-1.5 rounded border text-center ${
+                                  item.level === 'high'
+                                    ? 'border-red-500/50 bg-red-500/15 text-red-700 dark:text-red-300'
+                                    : item.level === 'medium'
+                                    ? 'border-amber-500/50 bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                    : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                                }`}
+                              >
+                                <div className="text-[10px] font-mono font-semibold">
+                                  {item.label.slice(0, 2)}
+                                </div>
+                                <div className="text-[11px] font-mono font-bold tabular-nums mt-0.5">
+                                  {item.riskPct}%
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                            Прогноз розраховується за частотою відключень у ці ж години за всі збережені дні архіву (це статистична закономірність, а не офіційний графік ДПЕМ).
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </section>
 
         {/* Hotspots Section: Streets & Substation/Feeder Districts */}
         <section className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] overflow-hidden">

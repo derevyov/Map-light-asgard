@@ -272,6 +272,8 @@ export interface ServerAuditVisit {
   ts: number;
   isAuthenticated: boolean;
   visitorTag: string;
+  authProvider?: 'google' | 'telegram';
+  authLabel?: string;
 }
 
 export interface ServerAuditStats {
@@ -290,8 +292,18 @@ export interface ArchivedDaySnapshot {
   queueSwitchOffHours: Partial<Record<SubqueueId, number>>;
   queueSwitchOnHours: Partial<Record<SubqueueId, number>>;
   queuePossibleHours: Partial<Record<SubqueueId, number>>;
+  /** Optional 48-char slot mask per queue ('0'=on, '1'=off, '2'=switch_off, '3'=switch_on, '4'=possible) */
+  queueOffSlotMask?: Partial<Record<SubqueueId, string>>;
   source: 'live' | 'fallback' | 'local-html';
   updatedAt: string;
+}
+
+export interface TelegramFavoriteItem {
+  label: string;
+  queue: SubqueueId;
+  secondaryQueue?: SubqueueId;
+  dualType?: DualQueueType;
+  isHome?: boolean;
 }
 
 export interface ArchivedStreetIncident {

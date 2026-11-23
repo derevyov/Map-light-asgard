@@ -16,6 +16,7 @@ import {
   Send,
   Shield,
   SlidersHorizontal,
+  Sparkles,
   Star,
   Sun,
   Zap,
@@ -50,9 +51,13 @@ import {
   deleteSharedOverride,
   deleteSharedTransfer,
   deleteUserRoleRecord,
+  getFirebaseIdToken,
+  loadAuditVisitArchives,
+  loadCloudAnalyticsArchive,
   logSharedAuditEvent,
   rejectAccessRequest,
   saveSharedOverride,
+  saveUserFavoritesPref,
   saveUserHomePref,
   setUserBanStatus,
   signInWithGoogle,
@@ -67,7 +72,9 @@ import {
   subscribeSharedManualPoints,
   subscribeSharedOverrides,
   subscribeSharedTransfers,
-  subscribeUserHomePref,
+  subscribeUserPrefs,
+  syncAuditVisitArchives,
+  syncCloudAnalyticsArchive,
   updateUserRoleType,
 } from './lib/firebase';
 import {
@@ -107,6 +114,12 @@ import {
   snapshotFromSchedule,
 } from './lib/outageAnalytics';
 import {
+  buildUnifiedDaySchedules,
+  detectScheduleShiftModel,
+  formatShiftSlotsUk,
+  resolveScheduleOrForecastForDate,
+} from './lib/scheduleForecast';
+import {
   AccessRequestRecord,
   AssignmentHistoryEntry,
   AuditEventRecord,
@@ -127,6 +140,7 @@ import {
   OutageNotice,
   ScheduleByDate,
   ServerAuditStats,
+  ServerAuditVisit,
   SlotState,
   SUBQUEUES,
   SubqueueId,
@@ -281,6 +295,7 @@ export default function App() {
   const [cloudAssignmentHistory, setCloudAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
   const [serverAuditStats, setServerAuditStats] = useState<ServerAuditStats | null>(null);
+  const [archivedAuditVisits, setArchivedAuditVisits] = useState<ServerAuditVisit[]>([]);
   const [loadingAuditStats, setLoadingAuditStats] = useState<boolean>(false);
   const [auditDashboardOpen, setAuditDashboardOpen] = useState<boolean>(false);
 
@@ -324,6 +339,8 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(() =>
     pickPreferredDate(fallbackSeed.scheduleByDate)
   );
+  const userPickedDateRef = useRef<boolean>(false);
+  const [customShiftSlots, setCustomShiftSlots] = useState<number | null>(null);
   const [timeSlot, setTimeSlot] = useState<number>(() => getCurrentHalfHourSlot());
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
@@ -604,10 +621,29 @@ export default function App() {
     if (authIdentity) {
       if (sentAuthKeyRef.current === authIdentity) return;
       sentAuthKeyRef.current = authIdentity;
+
+      const authProvider: 'google' | 'telegram' = authUser ? 'google' : 'telegram';
+      const authLabel = authUser
+        ? authUser.email
+          ? authUser.displayName
+            ? `${authUser.displayName} (${authUser.email})`
+            : authUser.email
+          : authUser.displayName || 'Google'
+        : telegramUser
+        ? `${[telegramUser.firstName, telegramUser.lastName].filter(Boolean).join(' ').trim() || 'Telegram'}${
+            telegramUser.username ? ` (@${telegramUser.username})` : ''
+          } · ID ${telegramUser.id}`
+        : undefined;
+
       void fetch('/api/audit/visit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visitorId, isAuthenticated: true }),
+        body: JSON.stringify({
+          visitorId,
+          isAuthenticated: true,
+          authProvider,
+          authLabel,
+        }),
       }).catch(() => {});
 
       if (authUser) {
@@ -617,7 +653,9 @@ export default function App() {
             sessionStorage.setItem(loginSessionKey, '1');
             void logSharedAuditEvent(
               'login',
-              `Вхід користувача ${authUser.displayName || 'Google'}`
+              `Вхід Google: ${authUser.displayName || 'Користувач'}${
+                authUser.email ? ` (${authUser.email})` : ''
+              }`
             );
           }
         } catch {
@@ -641,27 +679,127 @@ export default function App() {
     }).catch(() => {});
   }, [authUser, telegramUser]);
 
-  // Fetch server visit stats on demand ONLY when Admin tab or Audit Dashboard is opened
+  // Fetch server visit stats + merge & backup with permanent Firestore daily visit archives
   const refreshAuditStats = useCallback(async () => {
     setLoadingAuditStats(true);
     try {
-      const res = await fetch('/api/audit/stats');
-      if (res.ok) {
-        const data = (await res.json()) as ServerAuditStats;
-        setServerAuditStats(data);
+      const headers: Record<string, string> = {};
+      if (isSuperAdmin) {
+        const fbToken = await getFirebaseIdToken();
+        if (fbToken) headers['X-Firebase-Token'] = fbToken;
+      }
+      if (telegramSessionToken) {
+        headers.Authorization = `Bearer ${telegramSessionToken}`;
+      }
+
+      const [liveRes, cloudVisits] = await Promise.all([
+        fetch('/api/audit/stats', { cache: 'no-store', headers }).catch(() => null),
+        isSuperAdmin ? loadAuditVisitArchives(14).catch(() => []) : Promise.resolve([]),
+      ]);
+
+      let liveData: ServerAuditStats | null = null;
+      if (liveRes && liveRes.ok) {
+        liveData = (await liveRes.json()) as ServerAuditStats;
+        setServerAuditStats(liveData);
+      }
+
+      if (isSuperAdmin) {
+        if (cloudVisits.length > 0) {
+          setArchivedAuditVisits(cloudVisits);
+        }
+        if (liveData && Array.isArray(liveData.visits) && liveData.visits.length > 0) {
+          void syncAuditVisitArchives(liveData.visits).then(async () => {
+            const refreshed = await loadAuditVisitArchives(14).catch(() => []);
+            if (refreshed.length > 0) {
+              setArchivedAuditVisits(refreshed);
+            }
+          });
+        }
       }
     } catch {
       // ignore
     } finally {
       setLoadingAuditStats(false);
     }
-  }, []);
+  }, [isSuperAdmin, telegramSessionToken]);
 
   useEffect(() => {
     if (sidebarTab === 'admin' || auditDashboardOpen) {
       void refreshAuditStats();
     }
   }, [sidebarTab, auditDashboardOpen, refreshAuditStats]);
+
+  // Continuous background cloud archival for Super Admin so visits survive Render container redeploys
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    void refreshAuditStats();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void refreshAuditStats();
+      }
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [isSuperAdmin, refreshAuditStats]);
+
+  // Merge ephemeral Render server visits + permanent Firestore daily visit archives
+  const mergedAuditStats = useMemo<ServerAuditStats | null>(() => {
+    const liveVisits = serverAuditStats?.visits || [];
+    if (!serverAuditStats && archivedAuditVisits.length === 0) return null;
+
+    const now = Date.now();
+    const cutoff = now - 14 * 24 * 60 * 60 * 1000;
+    const activeCutoff = now - 15 * 60 * 1000;
+
+    const dedup = new Map<string, ServerAuditVisit>();
+    for (const v of [...archivedAuditVisits, ...liveVisits]) {
+      if (!Number.isFinite(v.ts) || v.ts < cutoff) continue;
+      const fp = `${Math.floor(v.ts / 60_000)}|${v.isAuthenticated ? '1' : '0'}|${v.visitorTag}`;
+      const existing = dedup.get(fp);
+      if (!existing || (!existing.authLabel && v.authLabel)) {
+        dedup.set(fp, v);
+      }
+    }
+
+    const visits = Array.from(dedup.values())
+      .sort((a, b) => a.ts - b.ts)
+      .slice(-2000);
+
+    const loggedInVisitors = new Set<string>();
+    const anonVisitors = new Set<string>();
+    const activeLoggedIn = new Set<string>();
+    const activeAnon = new Set<string>();
+    let totalAnonymousVisits = 0;
+    let totalLoggedInVisits = 0;
+
+    for (const v of visits) {
+      if (v.isAuthenticated) {
+        totalLoggedInVisits++;
+        loggedInVisitors.add(v.visitorTag);
+        if (v.ts >= activeCutoff) activeLoggedIn.add(v.visitorTag);
+      } else {
+        totalAnonymousVisits++;
+        anonVisitors.add(v.visitorTag);
+        if (v.ts >= activeCutoff) activeAnon.add(v.visitorTag);
+      }
+    }
+
+    for (const tag of loggedInVisitors) {
+      anonVisitors.delete(tag);
+    }
+    for (const tag of activeLoggedIn) {
+      activeAnon.delete(tag);
+    }
+
+    return {
+      uniqueAnonymous: Math.max(anonVisitors.size, serverAuditStats?.uniqueAnonymous || 0),
+      uniqueLoggedIn: Math.max(loggedInVisitors.size, serverAuditStats?.uniqueLoggedIn || 0),
+      totalAnonymousVisits: Math.max(totalAnonymousVisits, serverAuditStats?.totalAnonymousVisits || 0),
+      totalLoggedInVisits: Math.max(totalLoggedInVisits, serverAuditStats?.totalLoggedInVisits || 0),
+      activeLast15mAnon: Math.max(activeAnon.size, serverAuditStats?.activeLast15mAnon || 0),
+      activeLast15mLoggedIn: Math.max(activeLoggedIn.size, serverAuditStats?.activeLast15mLoggedIn || 0),
+      visits,
+    };
+  }, [serverAuditStats, archivedAuditVisits]);
 
   // Attach admin-only Firestore auditEvents listener ONLY when Super Admin views Admin/Audit
   useEffect(() => {
@@ -728,10 +866,20 @@ export default function App() {
     };
   }, [triggerDiffRender]);
 
-  // Subscribe to private per-user home address when signed in
+  // Subscribe to private per-user home address + favorites across all devices on the same Google account
+  const cloudFavsHydratedUidRef = useRef<string | null>(null);
+  const favoritesLatestRef = useRef<FavoriteAddress[]>(favorites);
+  favoritesLatestRef.current = favorites;
+  const myHomeKeyLatestRef = useRef<string | null>(myHomeKey);
+  myHomeKeyLatestRef.current = myHomeKey;
+
   useEffect(() => {
-    if (!authUser) return;
-    const unsub = subscribeUserHomePref(authUser.uid, (savedHome) => {
+    if (!authUser) {
+      cloudFavsHydratedUidRef.current = null;
+      return;
+    }
+    const uid = authUser.uid;
+    const unsub = subscribeUserPrefs(uid, ({ myHomeKey: savedHome, favorites: cloudFavs }) => {
       if (savedHome) {
         setMyHomeKey(savedHome);
         try {
@@ -740,6 +888,41 @@ export default function App() {
           // ignore
         }
         triggerDiffRender('Синхронізація Мій дім');
+      }
+
+      const isFirstHydration = cloudFavsHydratedUidRef.current !== uid;
+      cloudFavsHydratedUidRef.current = uid;
+
+      if (cloudFavs === null) {
+        // First time this account syncs favorites: push any existing local favorites to Firestore
+        const local = favoritesLatestRef.current;
+        if (local.length > 0) {
+          void saveUserFavoritesPref(uid, local, savedHome || myHomeKeyLatestRef.current || '').catch(
+            () => {}
+          );
+        }
+        return;
+      }
+
+      if (isFirstHydration) {
+        // Merge union on initial sign-in so locally starred items before sign-in are preserved
+        const local = favoritesLatestRef.current;
+        const cloudKeys = new Set(cloudFavs.map((f) => f.key));
+        const localOnly = local.filter((f) => !cloudKeys.has(f.key));
+        const mergedFavs = [...cloudFavs, ...localOnly].slice(0, 30);
+        setFavorites(mergedFavs);
+        void persistFavoritesToBrowserDb(mergedFavs);
+        if (localOnly.length > 0) {
+          void saveUserFavoritesPref(
+            uid,
+            mergedFavs,
+            savedHome || myHomeKeyLatestRef.current || ''
+          ).catch(() => {});
+        }
+      } else {
+        // Subsequent live updates from another device on the same account
+        setFavorites(cloudFavs);
+        void persistFavoritesToBrowserDb(cloudFavs);
       }
     });
     return () => unsub();
@@ -777,6 +960,33 @@ export default function App() {
     void refreshServerManualPoints();
   }, [refreshServerManualPoints]);
 
+  // Auto-promote community manual points created via Telegram/guest into permanent Firestore storage
+  const promotedPointIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isSuperAdmin || !cloudConnected || serverManualPoints.length === 0) return;
+    for (const sp of serverManualPoints) {
+      if (promotedPointIdsRef.current.has(sp.id)) continue;
+      const mLat = 111_132;
+      const mLng = 111_320 * Math.cos((sp.lat * Math.PI) / 180);
+      const alreadyInCloud = cloudManualPoints.some(
+        (cp) =>
+          cp.id === sp.id ||
+          Math.hypot((cp.lat - sp.lat) * mLat, (cp.lng - sp.lng) * mLng) < 15
+      );
+      promotedPointIdsRef.current.add(sp.id);
+      if (!alreadyInCloud) {
+        void createSharedManualPoint({
+          label: sp.label,
+          queue: sp.queue,
+          feeder: sp.feeder,
+          note: sp.note,
+          lat: sp.lat,
+          lng: sp.lng,
+        }).catch(() => {});
+      }
+    }
+  }, [isSuperAdmin, cloudConnected, serverManualPoints, cloudManualPoints]);
+
   const mergedManualPoints = useMemo(() => {
     const seenIds = new Set<string>();
     const combined: ManualPoint[] = [];
@@ -812,20 +1022,52 @@ export default function App() {
     [addressIndex, mergedOverrides, allActiveTransfers]
   );
 
+  const unifiedDaySchedules = useMemo(
+    () => buildUnifiedDaySchedules(scheduleByDate, analyticsArchive.days),
+    [scheduleByDate, analyticsArchive.days]
+  );
+
+  const shiftModel = useMemo(
+    () => detectScheduleShiftModel(unifiedDaySchedules),
+    [unifiedDaySchedules]
+  );
+
+  const selectedDayForecast = useMemo(
+    () =>
+      resolveScheduleOrForecastForDate(
+        selectedDate,
+        unifiedDaySchedules,
+        shiftModel,
+        customShiftSlots
+      ),
+    [selectedDate, unifiedDaySchedules, shiftModel, customShiftSlots]
+  );
+
   const currentQueuesMap = useMemo(
     () =>
-      scheduleByDate[selectedDate]?.queues || ({} as Partial<Record<SubqueueId, SlotState[]>>),
-    [scheduleByDate, selectedDate]
+      selectedDayForecast?.queues ||
+      scheduleByDate[selectedDate]?.queues ||
+      ({} as Partial<Record<SubqueueId, SlotState[]>>),
+    [selectedDayForecast, scheduleByDate, selectedDate]
   );
 
   const refreshOutageAnalytics = useCallback(async () => {
     setLoadingAnalytics(true);
     try {
-      const res = await fetch('/api/analytics/outages', { cache: 'no-store' });
-      if (!res.ok) return;
-      const serverData = (await res.json()) as OutageAnalyticsPayload;
+      const [serverRes, cloudDays] = await Promise.all([
+        fetch('/api/analytics/outages', { cache: 'no-store' })
+          .then((r) => (r.ok ? (r.json() as Promise<OutageAnalyticsPayload>) : null))
+          .catch(() => null),
+        loadCloudAnalyticsArchive().catch(() => []),
+      ]);
       setAnalyticsArchive((prev) => {
-        const merged = mergeAnalyticsArchives(prev, serverData);
+        const merged = mergeAnalyticsArchives(
+          prev,
+          serverRes,
+          cloudDays.length > 0
+            ? { updatedAt: new Date().toISOString(), days: cloudDays, streetIncidents: [] }
+            : null
+        );
         saveLocalAnalyticsArchive(merged);
         return merged;
       });
@@ -853,6 +1095,113 @@ export default function App() {
       return merged;
     });
   }, [scheduleByDate]);
+
+  // Super Admin auto-persists daily 48-slot schedules to Firestore so pattern history survives Render deploys
+  const lastCloudAnalyticsSigRef = useRef<string>('');
+  useEffect(() => {
+    if (!isSuperAdmin || !cloudConnected) return;
+    const daysWithMasks = analyticsArchive.days.filter(
+      (d) => d.queueOffSlotMask && Object.keys(d.queueOffSlotMask).length > 0
+    );
+    if (daysWithMasks.length === 0) return;
+    const sig = daysWithMasks
+      .map((d) => `${d.date}:${d.source}:${Object.keys(d.queueOffSlotMask || {}).length}`)
+      .join('|');
+    if (sig === lastCloudAnalyticsSigRef.current) return;
+    lastCloudAnalyticsSigRef.current = sig;
+    void syncCloudAnalyticsArchive(daysWithMasks);
+  }, [isSuperAdmin, cloudConnected, analyticsArchive.days]);
+
+  // Sync resolved favorites to Telegram bot backend whenever signed in via Telegram
+  const lastTgFavSyncSigRef = useRef<string>('');
+  useEffect(() => {
+    if (!telegramSessionToken) return;
+    const buildingByKey = new Map<string, BuildingRecord>();
+    for (const b of buildings) buildingByKey.set(b.key, b);
+    const manualByKey = new Map<string, ManualPoint>();
+    for (const mp of mergedManualPoints) manualByKey.set(`manual|${mp.id}`, mp);
+
+    const payloadItems: Array<{
+      label: string;
+      queue: SubqueueId;
+      secondaryQueue?: SubqueueId;
+      dualType?: 'none' | 'backup' | 'split_entrances' | 'split_lifts';
+      isHome?: boolean;
+    }> = [];
+
+    const pushFromFav = (fav: FavoriteAddress) => {
+      const mp = manualByKey.get(fav.key);
+      const b = buildingByKey.get(fav.key);
+      const resolved = !mp
+        ? resolveBuilding(b?.street || fav.street, b?.house || fav.house, resolverCtx)
+        : null;
+      const queue = mp?.queue || resolved?.primary || fav.queue;
+      if (!queue) return;
+      const secondaryQueue =
+        !mp && resolved?.secondary && resolved.secondary !== queue ? resolved.secondary : undefined;
+      const dualType = secondaryQueue ? resolved?.dualType : undefined;
+      const addrTitle =
+        fav.note.trim() ||
+        fav.label ||
+        `${fav.street}${fav.house ? `, ${fav.house}` : ''}`.trim();
+      payloadItems.push({
+        label: addrTitle.slice(0, 72),
+        queue,
+        ...(secondaryQueue ? { secondaryQueue } : {}),
+        ...(dualType && dualType !== 'none' ? { dualType } : {}),
+        ...(myHomeKey === fav.key ? { isHome: true } : {}),
+      });
+    };
+
+    for (const fav of favorites.slice(0, 15)) {
+      pushFromFav(fav);
+    }
+
+    // If "My Home" is set but not yet in favorites, include it first for the bot
+    if (myHomeKey && !favorites.some((f) => f.key === myHomeKey)) {
+      const homeBuilding = buildingByKey.get(myHomeKey);
+      const homeManual = manualByKey.get(myHomeKey);
+      if (homeManual) {
+        payloadItems.unshift({
+          label: `Мій дім (${homeManual.label})`.slice(0, 72),
+          queue: homeManual.queue,
+          isHome: true,
+        });
+      } else if (homeBuilding) {
+        const res = resolveBuilding(homeBuilding.street, homeBuilding.house, resolverCtx);
+        if (res?.primary) {
+          payloadItems.unshift({
+            label: `${homeBuilding.street}${homeBuilding.house ? `, ${homeBuilding.house}` : ''}`.slice(
+              0,
+              72
+            ),
+            queue: res.primary,
+            ...(res.secondary && res.secondary !== res.primary
+              ? { secondaryQueue: res.secondary, dualType: res.dualType }
+              : {}),
+            isHome: true,
+          });
+        }
+      }
+    }
+
+    const sig = JSON.stringify(payloadItems);
+    if (sig === lastTgFavSyncSigRef.current) return;
+    // Do not overwrite bot-picked queues with an empty Mini App list on initial load
+    if (payloadItems.length === 0 && lastTgFavSyncSigRef.current === '') return;
+    lastTgFavSyncSigRef.current = sig;
+
+    void fetch('/api/telegram/favorites', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${telegramSessionToken}`,
+      },
+      body: JSON.stringify({ favorites: payloadItems.slice(0, 15) }),
+    }).catch(() => {
+      // Non-blocking sync
+    });
+  }, [telegramSessionToken, favorites, myHomeKey, buildings, mergedManualPoints, resolverCtx]);
 
   const computedOutageAnalytics = useMemo(
     () =>
@@ -925,10 +1274,10 @@ export default function App() {
   }, [localOverrides]);
 
   useEffect(() => {
-    if (availableDates.length > 0 && !scheduleByDate[selectedDate]) {
+    if (availableDates.length > 0 && (!selectedDate || !/^\d{4}-\d{2}-\d{2}$/.test(selectedDate))) {
       setSelectedDate(availableDates[0]);
     }
-  }, [availableDates, scheduleByDate, selectedDate]);
+  }, [availableDates, selectedDate]);
 
   // Poll DPEM proxy (/api/dpem or custom Cloudflare Worker URL)
   const pollDpemApi = useCallback(
@@ -939,6 +1288,7 @@ export default function App() {
       if (force) {
         setIsPlaying(false);
         setTimeSlot(getCurrentHalfHourSlot());
+        userPickedDateRef.current = false;
       }
 
       setIsPolling(true);
@@ -953,7 +1303,11 @@ export default function App() {
           const preferred = pickPreferredDate(nextSchedule);
           setSelectedDate((prev) => {
             if (force) return preferred;
-            return nextSchedule[prev] ? prev : preferred;
+            if (nextSchedule[prev]) return prev;
+            if (userPickedDateRef.current && /^\d{4}-\d{2}-\d{2}$/.test(prev)) {
+              return prev;
+            }
+            return preferred;
           });
         }
         if (Array.isArray(data.feederRows) && data.feederRows.length > 0) {
@@ -1108,7 +1462,21 @@ export default function App() {
     return best;
   }, [pendingPickCoords, buildings, resolverCtx]);
 
-  // Favorites CRUD (Chrome IndexedDB + localStorage)
+  // Favorites CRUD (Browser IndexedDB + localStorage + Firestore cloud sync when signed in)
+  const commitFavoritesUpdate = useCallback(
+    (updater: (prev: FavoriteAddress[]) => FavoriteAddress[]) => {
+      setFavorites((prev) => {
+        const next = updater(prev).slice(0, 30);
+        void persistFavoritesToBrowserDb(next);
+        if (authUser) {
+          void saveUserFavoritesPref(authUser.uid, next, myHomeKey || '').catch(() => {});
+        }
+        return next;
+      });
+    },
+    [authUser, myHomeKey]
+  );
+
   const handleSaveFavorite = (b: BuildingRecord, note: string) => {
     const resolved =
       b.source === 'manual'
@@ -1128,29 +1496,19 @@ export default function App() {
       lng: b.lng,
       savedAt: new Date().toISOString(),
     };
-    setFavorites((prev) => {
-      const next = [item, ...prev.filter((x) => x.key !== b.key)];
-      void persistFavoritesToBrowserDb(next);
-      return next;
-    });
+    commitFavoritesUpdate((prev) => [item, ...prev.filter((x) => x.key !== b.key)]);
     showToast(`Збережено в обрані${note ? ` (${note})` : ''}`);
   };
 
   const handleUpdateFavoriteNote = (key: string, note: string) => {
-    setFavorites((prev) => {
-      const next = prev.map((f) => (f.key === key ? { ...f, note: note.slice(0, 120) } : f));
-      void persistFavoritesToBrowserDb(next);
-      return next;
-    });
+    commitFavoritesUpdate((prev) =>
+      prev.map((f) => (f.key === key ? { ...f, note: note.slice(0, 120) } : f))
+    );
     showToast('Примітку оновлено');
   };
 
   const handleRemoveFavorite = (key: string) => {
-    setFavorites((prev) => {
-      const next = prev.filter((f) => f.key !== key);
-      void persistFavoritesToBrowserDb(next);
-      return next;
-    });
+    commitFavoritesUpdate((prev) => prev.filter((f) => f.key !== key));
     showToast('Видалено з обраних');
   };
 
@@ -1193,11 +1551,7 @@ export default function App() {
           lng: existingNearby.lng,
           savedAt: new Date().toISOString(),
         };
-        setFavorites((prev) => {
-          const next = [fav, ...prev.filter((x) => x.key !== fav.key)];
-          void persistFavoritesToBrowserDb(next);
-          return next;
-        });
+        commitFavoritesUpdate((prev) => [fav, ...prev.filter((x) => x.key !== fav.key)]);
       }
       setPendingPickCoords(null);
       setPickMode(false);
@@ -1303,11 +1657,7 @@ export default function App() {
         lng: pt.lng,
         savedAt: pt.createdAt,
       };
-      setFavorites((prev) => {
-        const next = [fav, ...prev.filter((x) => x.key !== fav.key)];
-        void persistFavoritesToBrowserDb(next);
-        return next;
-      });
+      commitFavoritesUpdate((prev) => [fav, ...prev.filter((x) => x.key !== fav.key)]);
     }
 
     await appendAssignmentHistory({
@@ -1852,17 +2202,18 @@ export default function App() {
       />
 
       {/* Top Bar (Compact on Mobile <= 50px) */}
-      <header className="shrink-0 bg-white dark:bg-[#111827] border-b border-slate-200 dark:border-slate-800 px-3 sm:px-4 py-2 flex items-center justify-between gap-2 sm:gap-3 z-30">
+      <header className="shrink-0 bg-white dark:bg-[#111827] border-b border-slate-200 dark:border-slate-800 px-2.5 sm:px-4 py-2 flex items-center justify-between gap-1.5 sm:gap-3 z-30">
         {/* Zone 1: Brand Wordmark */}
         <button
           type="button"
           onClick={() => setActivePage('map')}
           title={`Карта ГПВ ДПЕМ · ${APP_VERSION_FULL}`}
-          className="flex items-center gap-1.5 sm:gap-2 shrink-0 text-left"
+          className="flex items-center gap-1 sm:gap-2 shrink-0 text-left"
         >
           <Zap className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
           <span className="text-sm sm:text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
-            <span className="hidden sm:inline">Південноукраїнськ · </span>ГПВ ДПЕМ
+            <span className="hidden sm:inline">Південноукраїнськ · </span>ГПВ
+            <span className="hidden sm:inline"> ДПЕМ</span>
           </span>
           <span className="hidden md:inline-block font-mono text-[10px] font-medium text-slate-500 dark:text-slate-400 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/70">
             v{APP_VERSION}
@@ -1907,15 +2258,15 @@ export default function App() {
           )}
         </div>
 
-        {/* Zone 3: Favorites Page + PWA Install + Theme + Refresh + Mobile Controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        {/* Zone 3: Favorites Page + Analytics + Desktop Utilities + Mobile Controls */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
           <button
             type="button"
             onClick={() => {
               triggerTelegramHaptic('light');
               setActivePage((p) => (p === 'favorites' ? 'map' : 'favorites'));
             }}
-            className={`p-2 sm:px-2.5 sm:py-1.5 rounded-md border text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap ${
+            className={`px-2 py-2 sm:px-2.5 sm:py-1.5 rounded-md border text-xs font-semibold transition-colors inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0 ${
               activePage === 'favorites'
                 ? 'bg-amber-500 border-amber-400 text-slate-950'
                 : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100'
@@ -1924,7 +2275,7 @@ export default function App() {
             aria-label="Обрані адреси"
           >
             <Star
-              className={`w-3.5 h-3.5 ${
+              className={`w-3.5 h-3.5 shrink-0 ${
                 activePage === 'favorites'
                   ? 'fill-slate-950 text-slate-950'
                   : 'text-amber-500 fill-amber-400'
@@ -1954,23 +2305,25 @@ export default function App() {
                 return next;
               });
             }}
-            className={`p-2 sm:px-2.5 sm:py-1.5 rounded-md border text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap ${
+            className={`p-2 sm:px-2.5 sm:py-1.5 rounded-md border text-xs font-semibold transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
               activePage === 'analytics'
                 ? 'bg-sky-600 border-sky-500 text-white'
                 : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100'
             }`}
-            title="Аналітика відключень: невезучі черги та гарячі точки (тиждень / місяць)"
+            title="Аналітика відключень та прогноз на місяць вперед"
             aria-label="Аналітика відключень"
           >
             <BarChart3
-              className={`w-3.5 h-3.5 ${
+              className={`w-3.5 h-3.5 shrink-0 ${
                 activePage === 'analytics' ? 'text-white' : 'text-sky-600 dark:text-sky-400'
               }`}
             />
             <span className="hidden md:inline">Статистика</span>
           </button>
 
-          <PWAInstallButton />
+          <div className="hidden sm:inline-flex items-center">
+            <PWAInstallButton />
+          </div>
 
           {getTelegramWebApp() ? (
             <button
@@ -1979,7 +2332,7 @@ export default function App() {
                 triggerTelegramHaptic('light');
                 openCurrentUrlInExternalBrowser();
               }}
-              className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+              className="hidden sm:inline-flex p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors items-center gap-1.5 whitespace-nowrap"
               title="Відкрити повний сайт у зовнішньому браузері (та додати ярлик PWA)"
               aria-label="Відкрити повний сайт у браузері"
             >
@@ -1991,7 +2344,7 @@ export default function App() {
               href={`https://t.me/${telegramBotUsername || 'Map_light_asgard_bot'}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-sky-50 dark:bg-sky-950/60 hover:bg-sky-100 dark:hover:bg-sky-900/60 border border-sky-300 dark:border-sky-800 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+              className="hidden sm:inline-flex p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-sky-50 dark:bg-sky-950/60 hover:bg-sky-100 dark:hover:bg-sky-900/60 border border-sky-300 dark:border-sky-800 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors items-center gap-1.5 whitespace-nowrap"
               title={`Відкрити Telegram-бот @${telegramBotUsername || 'Map_light_asgard_bot'}`}
               aria-label="Telegram-бот"
             >
@@ -2006,7 +2359,7 @@ export default function App() {
               triggerTelegramHaptic('light');
               setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
             }}
-            className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-slate-100 transition-colors inline-flex items-center gap-1.5"
+            className="hidden sm:inline-flex p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-slate-100 transition-colors items-center gap-1.5"
             title={theme === 'dark' ? 'Світла тема' : 'Темна тема'}
             aria-label="Перемкнути тему"
           >
@@ -2027,7 +2380,7 @@ export default function App() {
               void pollDpemApi(true);
             }}
             disabled={isPolling}
-            className="p-2 sm:px-3 sm:py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-xs font-semibold text-white transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+            className="hidden sm:inline-flex p-2 sm:px-3 sm:py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-xs font-semibold text-white transition-colors items-center gap-1.5 whitespace-nowrap"
             aria-label="Оновити дані ДПЕМ"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isPolling ? 'animate-spin' : ''}`} />
@@ -2038,7 +2391,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setMobileFiltersOpen((v) => !v)}
-              className={`md:hidden p-2 rounded-md border transition-colors ${
+              className={`md:hidden p-2 rounded-md border transition-colors shrink-0 ${
                 mobileFiltersOpen
                   ? 'bg-sky-600 border-sky-500 text-white'
                   : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200'
@@ -2052,7 +2405,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setMobileSidebarOpen(true)}
-            className="lg:hidden relative p-2 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200"
+            className="lg:hidden relative p-2 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 shrink-0"
             aria-label="Відкрити панель управління"
           >
             <Menu className="w-3.5 h-3.5" />
@@ -2146,6 +2499,7 @@ export default function App() {
               onClick={() => {
                 setIsPlaying(false);
                 setTimeSlot(getCurrentHalfHourSlot());
+                userPickedDateRef.current = false;
                 setSelectedDate(pickPreferredDate(scheduleByDate));
                 triggerDiffRender('Поточний час');
               }}
@@ -2178,7 +2532,10 @@ export default function App() {
             <CalendarDatePicker
               selectedDate={selectedDate}
               availableDates={availableDates}
+              allowForecast
+              isForecastDate={Boolean(selectedDayForecast?.isForecast)}
               onSelectDate={(dt) => {
+                userPickedDateRef.current = true;
                 setSelectedDate(dt);
                 triggerDiffRender(`Дата ${dt}`);
               }}
@@ -2280,6 +2637,34 @@ export default function App() {
             </span>
           </div>
         </div>
+
+        {selectedDayForecast?.isForecast && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-md bg-violet-500/10 border border-violet-500/30 text-[11px] text-violet-800 dark:text-violet-200">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Sparkles className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400 shrink-0" />
+              <span className="font-semibold">
+                Прогноз карти на {selectedDate} ({selectedDayForecast.daysOffset > 0 ? `+${selectedDayForecast.daysOffset}` : selectedDayForecast.daysOffset} дн.)
+              </span>
+              <span className="hidden sm:inline text-violet-700/80 dark:text-violet-300/80 truncate">
+                ·{' '}
+                {customShiftSlots !== null
+                  ? `Ручний зсув ${formatShiftSlotsUk(customShiftSlots)}/добу`
+                  : selectedDayForecast.summaryUk}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                userPickedDateRef.current = false;
+                setSelectedDate(pickPreferredDate(scheduleByDate));
+                triggerDiffRender('Повернення до офіційного графіка');
+              }}
+              className="px-2 py-0.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-semibold shrink-0"
+            >
+              До офіц.
+            </button>
+          </div>
+        )}
       </section>
 
       {/* Dedicated Full-Viewport Favorites Watch Page */}
@@ -2294,6 +2679,7 @@ export default function App() {
           availableDates={availableDates}
           selectedDate={selectedDate}
           onSelectDate={(dt) => {
+            userPickedDateRef.current = true;
             setSelectedDate(dt);
             triggerDiffRender(`Дата ${dt}`);
           }}
@@ -2320,6 +2706,10 @@ export default function App() {
           }}
           onUpdateFavoriteNote={handleUpdateFavoriteNote}
           onRemoveFavorite={handleRemoveFavorite}
+          forecastInfo={selectedDayForecast}
+          shiftModel={shiftModel}
+          customShiftSlots={customShiftSlots}
+          onChangeCustomShiftSlots={setCustomShiftSlots}
         />
       )}
 
@@ -2350,6 +2740,23 @@ export default function App() {
           onOpenAuditModal={() => {
             setAuditDashboardOpen(true);
             void refreshAuditStats();
+          }}
+          availableDates={availableDates}
+          unifiedDays={unifiedDaySchedules}
+          shiftModel={shiftModel}
+          customShiftSlots={customShiftSlots}
+          onChangeCustomShiftSlots={setCustomShiftSlots}
+          onOpenDateInFavorites={(dt) => {
+            userPickedDateRef.current = true;
+            setSelectedDate(dt);
+            setActivePage('favorites');
+            triggerDiffRender(`Прогноз обрані ${dt}`);
+          }}
+          onOpenDateOnMap={(dt) => {
+            userPickedDateRef.current = true;
+            setSelectedDate(dt);
+            setActivePage('map');
+            triggerDiffRender(`Прогноз карта ${dt}`);
           }}
         />
       )}
@@ -2550,7 +2957,7 @@ export default function App() {
           emergencyOutages={emergencyOutages}
           plannedOutages={plannedOutages}
           operUpdatedAt={operUpdatedAt}
-          auditStats={serverAuditStats}
+          auditStats={mergedAuditStats}
           auditEditsCount={Math.max(
             mergedAssignmentHistory.length,
             auditEvents.filter((e) => e.eventType !== 'login').length
@@ -2581,6 +2988,21 @@ export default function App() {
             setTelegramSessionToken(null);
             showToast('Вихід з Telegram виконано');
           }}
+          theme={theme}
+          onToggleTheme={() => {
+            triggerTelegramHaptic('light');
+            setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+          }}
+          isPolling={isPolling}
+          onRefreshDpem={() => {
+            triggerTelegramHaptic('light');
+            void pollDpemApi(true);
+          }}
+          isTelegramMiniApp={Boolean(getTelegramWebApp())}
+          onOpenExternalBrowser={() => {
+            triggerTelegramHaptic('light');
+            openCurrentUrlInExternalBrowser();
+          }}
         />
       </main>
 
@@ -2588,7 +3010,7 @@ export default function App() {
       {auditDashboardOpen && (
         <AuditDashboardModal
           isAdminUser={isAdminUser}
-          stats={serverAuditStats}
+          stats={mergedAuditStats}
           loadingStats={loadingAuditStats}
           onRefreshStats={() => {
             void refreshAuditStats();

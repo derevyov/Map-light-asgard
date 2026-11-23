@@ -5,6 +5,7 @@ import {
   Cloud,
   Database,
   Download,
+  ExternalLink,
   FileUp,
   History,
   Home,
@@ -12,12 +13,14 @@ import {
   LogOut,
   MapPin,
   MapPinPlus,
+  Moon,
   Pencil,
   RefreshCw,
   Send,
   Shield,
   Shuffle,
   Star,
+  Sun,
   Trash2,
   Upload,
   UserPlus,
@@ -130,6 +133,12 @@ interface SidebarPanelProps {
   telegramBotUsername: string | null;
   onTelegramWidgetAuth: (payload: TelegramLoginWidgetPayload) => void;
   onTelegramSignOut: () => void;
+  theme?: 'dark' | 'light';
+  onToggleTheme?: () => void;
+  isPolling?: boolean;
+  onRefreshDpem?: () => void;
+  isTelegramMiniApp?: boolean;
+  onOpenExternalBrowser?: () => void;
 }
 
 function computeLiveCountdown(
@@ -247,6 +256,12 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
   telegramBotUsername,
   onTelegramWidgetAuth,
   onTelegramSignOut,
+  theme = 'dark',
+  onToggleTheme,
+  isPolling = false,
+  onRefreshDpem,
+  isTelegramMiniApp = false,
+  onOpenExternalBrowser,
 }) => {
   const [targetQueue, setTargetQueue] = useState<SubqueueId>('6-1');
   const [targetFeeder, setTargetFeeder] = useState<string>('');
@@ -377,6 +392,61 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
             >
               <X className="w-4 h-4" />
             </button>
+          )}
+        </div>
+
+        {/* Mobile Quick Actions (hidden from crowded top bar on small screens & Telegram Mini App) */}
+        <div className="sm:hidden flex items-center gap-1.5 px-3 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0b1120]/70 shrink-0">
+          {onRefreshDpem && (
+            <button
+              type="button"
+              disabled={isPolling}
+              onClick={() => {
+                onRefreshDpem();
+                onCloseMobile();
+              }}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-[11px] font-semibold text-white whitespace-nowrap"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isPolling ? 'animate-spin' : ''}`} />
+              <span>Оновити</span>
+            </button>
+          )}
+          {onToggleTheme && (
+            <button
+              type="button"
+              onClick={onToggleTheme}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-slate-800 dark:text-slate-100 whitespace-nowrap"
+            >
+              {theme === 'dark' ? (
+                <Sun className="w-3.5 h-3.5 text-amber-400" />
+              ) : (
+                <Moon className="w-3.5 h-3.5 text-slate-600" />
+              )}
+              <span>{theme === 'dark' ? 'Світла' : 'Темна'}</span>
+            </button>
+          )}
+          {isTelegramMiniApp && onOpenExternalBrowser ? (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenExternalBrowser();
+                onCloseMobile();
+              }}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold text-sky-700 dark:text-sky-300 whitespace-nowrap"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>У браузері</span>
+            </button>
+          ) : (
+            <a
+              href={`https://t.me/${telegramBotUsername || 'Map_light_asgard_bot'}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-300 dark:border-sky-800 text-[11px] font-semibold text-sky-700 dark:text-sky-300 whitespace-nowrap"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>Бот</span>
+            </a>
           )}
         </div>
 

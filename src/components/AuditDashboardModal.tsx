@@ -313,20 +313,127 @@ export const AuditDashboardModal: React.FC<AuditDashboardModalProps> = ({
       .slice(0, 6);
   }, [allEditRecords]);
 
+  // Authorized users login directory (Admin-only visibility: Google name/email + Telegram name/@username/ID)
+  const authorizedUsersList = useMemo(() => {
+    if (!isAdminUser) return [];
+    const byKey = new Map<
+      string,
+      {
+        key: string;
+        provider: 'google' | 'telegram';
+        label: string;
+        visitsCount: number;
+        lastSeenTs: number;
+      }
+    >();
+
+    for (const v of stats?.visits || []) {
+      if (!v.isAuthenticated) continue;
+      const provider: 'google' | 'telegram' =
+        v.authProvider ||
+        (v.visitorTag.startsWith('tg_') || v.authLabel?.includes('· ID ') ? 'telegram' : 'google');
+      const label = v.authLabel || `Користувач #${v.visitorTag}`;
+      const key = `${provider}:${label.toLowerCase()}`;
+      const prev = byKey.get(key);
+      if (prev) {
+        prev.visitsCount += 1;
+        if (v.ts > prev.lastSeenTs) prev.lastSeenTs = v.ts;
+      } else {
+        byKey.set(key, {
+          key,
+          provider,
+          label,
+          visitsCount: 1,
+          lastSeenTs: v.ts,
+        });
+      }
+    }
+
+    for (const ev of auditEvents) {
+      if (ev.eventType !== 'login') continue;
+      const ts = Date.parse(ev.timestamp);
+      if (!Number.isFinite(ts)) continue;
+      // Extract email if present in summary like "Вхід Google: Name (email@gmail.com)"
+      const cleanedSummary = ev.summary
+        .replace(/^Вхід\s+(?:Google|користувача):\s*/i, '')
+        .replace(/^Вхід\s+користувача\s+/i, '')
+        .trim();
+      const label = cleanedSummary || ev.actorName || `Google #${ev.actorUid.slice(0, 6)}`;
+      const key = `google:${label.toLowerCase()}`;
+      const prev = byKey.get(key);
+      if (prev) {
+        if (Math.abs(prev.lastSeenTs - ts) > 60_000) {
+          prev.visitsCount += 1;
+        }
+        if (ts > prev.lastSeenTs) prev.lastSeenTs = ts;
+      } else {
+        byKey.set(key, {
+          key,
+          provider: 'google',
+          label,
+          visitsCount: 1,
+          lastSeenTs: ts,
+        });
+      }
+    }
+
+    return Array.from(byKey.values()).sort((a, b) => b.lastSeenTs - a.lastSeenTs);
+  }, [isAdminUser, stats, auditEvents]);
+
   // Unified recent audit feed
   const feedItems = useMemo(() => {
     const list: UnifiedFeedItem[] = [];
+    const seenAuthVisitMinutes = new Set<number>();
 
     for (const v of (stats?.visits || []).slice(-60)) {
+      if (v.isAuthenticated) {
+        seenAuthVisitMinutes.add(Math.floor(v.ts / 60_000));
+      }
+      const provBadge =
+        v.isAuthenticated && v.authProvider === 'telegram'
+          ? 'Вхід (Telegram)'
+          : v.isAuthenticated && v.authProvider === 'google'
+          ? 'Вхід (Google)'
+          : v.isAuthenticated
+          ? 'Захід (авториз.)'
+          : 'Анонімний захід';
       list.push({
         id: `v_${v.ts}_${v.visitorTag}`,
         ts: v.ts,
         kind: v.isAuthenticated ? 'visit_auth' : 'visit_anon',
-        badge: v.isAuthenticated ? 'Захід (авториз.)' : 'Анонімний захід',
-        actor: v.isAuthenticated ? `Користувач #${v.visitorTag}` : `Гість #${v.visitorTag}`,
+        badge: provBadge,
+        actor: v.isAuthenticated
+          ? isAdminUser && v.authLabel
+            ? v.authLabel
+            : `Користувач #${v.visitorTag}`
+          : `Гість #${v.visitorTag}`,
         text: v.isAuthenticated
-          ? 'Відкриття карти авторизованим користувачем'
+          ? v.authProvider === 'telegram'
+            ? 'Відкриття карти через Telegram'
+            : 'Відкриття карти авторизованим користувачем'
           : 'Перегляд карти без входу в акаунт',
+      });
+    }
+
+    // Include persistent Firestore login events in feed (with real display name / email)
+    for (const ev of auditEvents) {
+      if (ev.eventType !== 'login') continue;
+      const ts = Date.parse(ev.timestamp);
+      if (!Number.isFinite(ts)) continue;
+      const minuteBucket = Math.floor(ts / 60_000);
+      if (seenAuthVisitMinutes.has(minuteBucket)) continue;
+      seenAuthVisitMinutes.add(minuteBucket);
+      const loginLabel = ev.summary
+        .replace(/^Вхід\s+(?:Google|користувача):\s*/i, '')
+        .replace(/^Вхід\s+користувача\s+/i, '')
+        .trim();
+      list.push({
+        id: `fl_${ev.id}`,
+        ts,
+        kind: 'visit_auth',
+        badge: 'Вхід (Google)',
+        actor: isAdminUser && loginLabel ? loginLabel : ev.actorName || 'Користувач',
+        text: ev.summary || 'Авторизований вхід на карту',
       });
     }
 
@@ -353,8 +460,8 @@ export const AuditDashboardModal: React.FC<AuditDashboardModalProps> = ({
         if (feedFilter === 'edits') return item.kind === 'edit';
         return true;
       })
-      .slice(0, 50);
-  }, [stats, allEditRecords, feedFilter]);
+      .slice(0, 60);
+  }, [isAdminUser, stats, auditEvents, allEditRecords, feedFilter]);
 
   const maxVisitVal = Math.max(
     1,
@@ -904,6 +1011,66 @@ export const AuditDashboardModal: React.FC<AuditDashboardModalProps> = ({
                   );
                 })}
               </section>
+
+              {isAdminUser && (
+                <section className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                      <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>Авторизовані користувачі</span>
+                    </h3>
+                    <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                      {authorizedUsersList.length}
+                    </span>
+                  </div>
+                  {authorizedUsersList.length === 0 ? (
+                    <p className="text-[11px] text-slate-500">
+                      Авторизованих входів ще не зафіксовано.
+                    </p>
+                  ) : (
+                    <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-52 overflow-y-auto pr-1">
+                      {authorizedUsersList.map((u) => (
+                        <div
+                          key={u.key}
+                          className="py-1.5 flex items-start justify-between gap-2 text-[11px]"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[9px] font-semibold uppercase tracking-wide ${
+                                  u.provider === 'telegram'
+                                    ? 'bg-sky-100 dark:bg-sky-950/70 text-sky-700 dark:text-sky-300'
+                                    : 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300'
+                                }`}
+                              >
+                                {u.provider === 'telegram' ? 'Telegram' : 'Google'}
+                              </span>
+                              <span className="font-medium text-slate-800 dark:text-slate-100 break-all">
+                                {u.label}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 font-mono">
+                              Останній вхід:{' '}
+                              {new Date(u.lastSeenTs).toLocaleString('uk-UA', {
+                                day: '2-digit',
+                                month: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </div>
+                          </div>
+                          <span
+                            className="font-mono font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums shrink-0"
+                            title="Кількість входів"
+                          >
+                            ×{u.visitsCount}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
 
               <section className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] space-y-2 text-xs">
                 <h3 className="font-semibold text-slate-900 dark:text-slate-100">

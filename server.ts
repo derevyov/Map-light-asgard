@@ -14,8 +14,10 @@ import type {
   ArchivedDaySnapshot,
   ArchivedStreetIncident,
   DpemApiPayload,
+  DualQueueType,
   OutageAnalyticsPayload,
   SubqueueId,
+  TelegramFavoriteItem,
 } from './src/lib/types.ts';
 import { SUBQUEUES } from './src/lib/types.ts';
 
@@ -25,8 +27,16 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const DPEM_CACHE_TTL_MS = 300_000; // 5 min server cache (ideal for free hosting & <=50 users)
 const OSM_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-const AUDIT_STORE_PATH = '/tmp/dpem_audit_visits_v1.json';
-const ANALYTICS_STORE_PATH = '/tmp/dpem_analytics_30d_v1.json';
+const SERVER_DATA_DIR = process.env.DATA_DIR?.trim() || '/tmp';
+try {
+  if (SERVER_DATA_DIR !== '/tmp' && !fs.existsSync(SERVER_DATA_DIR)) {
+    fs.mkdirSync(SERVER_DATA_DIR, { recursive: true });
+  }
+} catch {
+  // Fallback safely if custom DATA_DIR is not writable
+}
+const AUDIT_STORE_PATH = path.join(SERVER_DATA_DIR, 'dpem_audit_visits_v1.json');
+const ANALYTICS_STORE_PATH = path.join(SERVER_DATA_DIR, 'dpem_analytics_30d_v1.json');
 const AUDIT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const ANALYTICS_MAX_DAYS = 35;
 const ANALYTICS_MAX_INCIDENTS = 400;
@@ -317,6 +327,95 @@ interface StoredVisitEvent {
   ts: number;
   visitorId: string;
   isAuthenticated: boolean;
+  authProvider?: 'google' | 'telegram';
+  authLabel?: string;
+}
+
+const FIREBASE_PROJECT_ID = (() => {
+  try {
+    const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { projectId?: string };
+      if (typeof cfg.projectId === 'string' && cfg.projectId.trim()) {
+        return cfg.projectId.trim();
+      }
+    }
+  } catch {
+    // fallback below
+  }
+  return 'gen-lang-client-0744147914';
+})();
+
+const SUPER_ADMIN_EMAIL = 'derevyov@gmail.com';
+let firebaseCertsCache: { expiresAt: number; certs: Record<string, string> } | null = null;
+
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  if (firebaseCertsCache && Date.now() < firebaseCertsCache.expiresAt) {
+    return firebaseCertsCache.certs;
+  }
+  const res = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com',
+    { signal: AbortSignal.timeout(8000) }
+  );
+  if (!res.ok) throw new Error('Failed to fetch Firebase public certs');
+  const certs = (await res.json()) as Record<string, string>;
+  const cc = res.headers.get('cache-control') || '';
+  const maxAgeMatch = /max-age=(\d+)/i.exec(cc);
+  const ttlSec = maxAgeMatch ? Math.min(21600, Math.max(300, Number(maxAgeMatch[1]))) : 3600;
+  firebaseCertsCache = { expiresAt: Date.now() + ttlSec * 1000, certs };
+  return certs;
+}
+
+async function verifyFirebaseSuperAdminToken(idToken: string): Promise<boolean> {
+  if (!idToken || idToken.length > 8192) return false;
+  const parts = idToken.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as {
+      alg?: string;
+      kid?: string;
+    };
+    if (header.alg !== 'RS256' || typeof header.kid !== 'string') return false;
+    const certs = await getFirebasePublicCerts();
+    const cert = certs[header.kid];
+    if (!cert) return false;
+
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(`${parts[0]}.${parts[1]}`);
+    verifier.end();
+    const sigBuf = Buffer.from(parts[2], 'base64url');
+    if (!verifier.verify(cert, sigBuf)) return false;
+
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      aud?: string;
+      iss?: string;
+      exp?: number;
+      email?: string;
+      email_verified?: boolean;
+    };
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (
+      payload.aud !== FIREBASE_PROJECT_ID ||
+      payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}` ||
+      typeof payload.exp !== 'number' ||
+      payload.exp < nowSec
+    ) {
+      return false;
+    }
+    return (
+      payload.email_verified === true &&
+      typeof payload.email === 'string' &&
+      payload.email.toLowerCase() === SUPER_ADMIN_EMAIL
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeAuthLabel(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw.replace(/[\r\n|]+/g, ' ').trim().slice(0, 110);
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 let auditVisits: StoredVisitEvent[] = (() => {
@@ -342,6 +441,60 @@ let auditVisits: StoredVisitEvent[] = (() => {
 
 const lastVisitByKey = new Map<string, number>();
 let auditSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function recordAuditVisit(
+  visitorId: string,
+  isAuthenticated: boolean,
+  authProvider?: 'google' | 'telegram',
+  authLabel?: string
+): void {
+  const now = Date.now();
+  const dedupKey = `${visitorId}:${isAuthenticated ? '1' : '0'}:${authProvider || ''}`;
+  const lastTs = lastVisitByKey.get(dedupKey) || 0;
+  if (now - lastTs < AUDIT_DEDUP_MS) {
+    // Still upgrade existing recent visit entry if it didn't have authLabel yet
+    if (isAuthenticated && authLabel) {
+      for (let i = auditVisits.length - 1; i >= Math.max(0, auditVisits.length - 40); i--) {
+        if (
+          auditVisits[i].visitorId === visitorId &&
+          auditVisits[i].isAuthenticated &&
+          !auditVisits[i].authLabel
+        ) {
+          auditVisits[i].authLabel = authLabel;
+          if (authProvider) auditVisits[i].authProvider = authProvider;
+          scheduleAuditFlush();
+          break;
+        }
+      }
+    }
+    return;
+  }
+
+  lastVisitByKey.set(dedupKey, now);
+  if (lastVisitByKey.size > 4000) {
+    const stale = now - AUDIT_DEDUP_MS;
+    for (const [k, ts] of lastVisitByKey.entries()) {
+      if (ts < stale) lastVisitByKey.delete(k);
+    }
+  }
+
+  const cutoff = now - AUDIT_RETENTION_MS;
+  if (auditVisits.length > 0 && auditVisits[0].ts < cutoff) {
+    auditVisits = auditVisits.filter((v) => v.ts >= cutoff);
+  }
+
+  auditVisits.push({
+    ts: now,
+    visitorId,
+    isAuthenticated,
+    ...(isAuthenticated && authProvider ? { authProvider } : {}),
+    ...(isAuthenticated && authLabel ? { authLabel } : {}),
+  });
+  if (auditVisits.length > AUDIT_MAX_EVENTS) {
+    auditVisits = auditVisits.slice(-AUDIT_MAX_EVENTS);
+  }
+  scheduleAuditFlush();
+}
 
 function scheduleAuditFlush(): void {
   if (auditSaveTimer) return;
@@ -425,6 +578,7 @@ function recordDpemPayloadToAnalytics(payload: DpemApiPayload): void {
     const queueSwitchOffHours: Partial<Record<SubqueueId, number>> = {};
     const queueSwitchOnHours: Partial<Record<SubqueueId, number>> = {};
     const queuePossibleHours: Partial<Record<SubqueueId, number>> = {};
+    const queueOffSlotMask: Partial<Record<SubqueueId, string>> = {};
 
     for (const q of SUBQUEUES) {
       const slots = day.queues[q];
@@ -433,27 +587,47 @@ function recordDpemPayloadToAnalytics(payload: DpemApiPayload): void {
       let swOff = 0;
       let swOn = 0;
       let poss = 0;
+      let mask = '';
       for (let i = 0; i < Math.min(48, slots.length); i++) {
         const s = slots[i];
-        if (s === 'off') off += 0.5;
-        else if (s === 'switch_off') swOff += 0.5;
-        else if (s === 'switch_on') swOn += 0.5;
-        else if (s === 'possible') poss += 0.5;
+        if (s === 'off') {
+          off += 0.5;
+          mask += '1';
+        } else if (s === 'switch_off') {
+          swOff += 0.5;
+          mask += '2';
+        } else if (s === 'switch_on') {
+          swOn += 0.5;
+          mask += '3';
+        } else if (s === 'possible') {
+          poss += 0.5;
+          mask += '4';
+        } else {
+          mask += '0';
+        }
       }
       queueOffHours[q] = off;
       queueSwitchOffHours[q] = swOff;
       queueSwitchOnHours[q] = swOn;
       queuePossibleHours[q] = poss;
+      if (mask.length === 48) {
+        queueOffSlotMask[q] = mask;
+      }
     }
 
     const existing = daysMap.get(date);
     if (!existing || existing.source === 'fallback' || payload.source === 'live') {
+      const mergedMasks = {
+        ...(existing?.queueOffSlotMask || {}),
+        ...queueOffSlotMask,
+      };
       daysMap.set(date, {
         date,
         queueOffHours,
         queueSwitchOffHours,
         queueSwitchOnHours,
         queuePossibleHours,
+        ...(Object.keys(mergedMasks).length > 0 ? { queueOffSlotMask: mergedMasks } : {}),
         source: payload.source,
         updatedAt: nowIso,
       });
@@ -566,9 +740,16 @@ async function startServer() {
     }
   });
 
-  // Lightweight zero-PII visit beacon (1 request per session; 10 min server dedup)
+  // Lightweight visit beacon (1 request per session; 10 min server dedup)
   app.post('/api/audit/visit', express.json({ limit: '4kb' }), (req, res) => {
-    const body = req.body as { visitorId?: unknown; isAuthenticated?: unknown } | undefined;
+    const body = req.body as
+      | {
+          visitorId?: unknown;
+          isAuthenticated?: unknown;
+          authProvider?: unknown;
+          authLabel?: unknown;
+        }
+      | undefined;
     const rawId = typeof body?.visitorId === 'string' ? body.visitorId.trim() : '';
     const isAuthenticated = body?.isAuthenticated === true;
 
@@ -577,40 +758,29 @@ async function startServer() {
       return;
     }
 
-    const now = Date.now();
-    const dedupKey = `${rawId}:${isAuthenticated ? '1' : '0'}`;
-    const lastTs = lastVisitByKey.get(dedupKey) || 0;
-    if (now - lastTs < AUDIT_DEDUP_MS) {
-      res.status(204).end();
-      return;
-    }
+    const authProvider =
+      body?.authProvider === 'google' || body?.authProvider === 'telegram'
+        ? body.authProvider
+        : undefined;
+    const authLabel = isAuthenticated ? sanitizeAuthLabel(body?.authLabel) : undefined;
 
-    lastVisitByKey.set(dedupKey, now);
-    if (lastVisitByKey.size > 4000) {
-      const stale = now - AUDIT_DEDUP_MS;
-      for (const [k, ts] of lastVisitByKey.entries()) {
-        if (ts < stale) lastVisitByKey.delete(k);
-      }
-    }
-
-    const cutoff = now - AUDIT_RETENTION_MS;
-    if (auditVisits.length > 0 && auditVisits[0].ts < cutoff) {
-      auditVisits = auditVisits.filter((v) => v.ts >= cutoff);
-    }
-
-    auditVisits.push({ ts: now, visitorId: rawId, isAuthenticated });
-    if (auditVisits.length > AUDIT_MAX_EVENTS) {
-      auditVisits = auditVisits.slice(-AUDIT_MAX_EVENTS);
-    }
-    scheduleAuditFlush();
+    recordAuditVisit(rawId, isAuthenticated, authProvider, authLabel);
     res.status(204).end();
   });
 
-  app.get('/api/audit/stats', (_req, res) => {
+  app.get('/api/audit/stats', async (req, res) => {
     const now = Date.now();
     const cutoff = now - AUDIT_RETENTION_MS;
     const activeCutoff = now - 15 * 60 * 1000;
     const recent = auditVisits.filter((v) => v.ts >= cutoff);
+
+    // Reveal authorized user login labels ONLY to cryptographically verified Admins
+    const fbToken = String(req.header('x-firebase-token') || '').trim();
+    const authHeader = req.headers.authorization || '';
+    const tgToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const tgSession = tgToken ? verifyTelegramSessionToken(tgToken) : null;
+    const isVerifiedAdmin =
+      Boolean(tgSession?.isTelegramAdmin) || (fbToken ? await verifyFirebaseSuperAdminToken(fbToken) : false);
 
     const loggedInVisitors = new Set<string>();
     const anonVisitors = new Set<string>();
@@ -651,6 +821,12 @@ async function startServer() {
         ts: v.ts,
         isAuthenticated: v.isAuthenticated,
         visitorTag: v.visitorId.slice(0, 6),
+        ...(isVerifiedAdmin && v.isAuthenticated && v.authProvider
+          ? { authProvider: v.authProvider }
+          : {}),
+        ...(isVerifiedAdmin && v.isAuthenticated && v.authLabel
+          ? { authLabel: v.authLabel }
+          : {}),
       })),
     });
   });
@@ -659,12 +835,20 @@ async function startServer() {
   // Telegram Mini App & Login Widget Cryptographic Authentication (HMAC-SHA256)
   // ============================================================================
   const SESSION_SECRET =
-    process.env.SESSION_SIGNING_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+    process.env.SESSION_SIGNING_SECRET?.trim() ||
+    (process.env.TELEGRAM_BOT_TOKEN?.trim()
+      ? crypto
+          .createHmac('sha256', process.env.TELEGRAM_BOT_TOKEN.trim())
+          .update('dpem-tg-session-signing-v1')
+          .digest('hex')
+      : crypto.randomBytes(32).toString('hex'));
   const TELEGRAM_AUTH_MAX_AGE_SEC = 24 * 60 * 60; // 24h freshness window
+
+  const DEFAULT_TELEGRAM_ADMIN_ID = 385900759;
 
   function parseTelegramAdminIds(): Set<number> {
     const raw = process.env.TELEGRAM_ADMIN_IDS || '';
-    const set = new Set<number>();
+    const set = new Set<number>([DEFAULT_TELEGRAM_ADMIN_ID]);
     for (const part of raw.split(',')) {
       const n = Number(part.trim());
       if (Number.isSafeInteger(n) && n > 0) set.add(n);
@@ -741,9 +925,167 @@ async function startServer() {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
 
+  // ============================================================================
+  // Per-Telegram-User Favorites Sync (bridges Mini App favorites <-> Telegram Bot)
+  // ============================================================================
+  const TG_FAVORITES_STORE_PATH =
+    process.env.TG_FAVORITES_STORE_PATH?.trim() ||
+    path.join(SERVER_DATA_DIR, 'dpem_tg_user_favorites_v1.json');
+  const TG_FAVORITES_MAX_ITEMS = 15;
+  const TG_FAVORITES_MAX_USERS = 2000;
+  const VALID_DUAL_TYPES: DualQueueType[] = ['none', 'backup', 'split_entrances', 'split_lifts'];
+
+  const tgUserFavorites = new Map<string, TelegramFavoriteItem[]>();
+  try {
+    if (fs.existsSync(TG_FAVORITES_STORE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(TG_FAVORITES_STORE_PATH, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [uid, list] of Object.entries(parsed)) {
+          if (!/^\d{4,20}$/.test(uid) || !Array.isArray(list)) continue;
+          const clean = sanitizeTelegramFavoritesList(list);
+          if (clean.length > 0) tgUserFavorites.set(uid, clean);
+        }
+      }
+    }
+  } catch {
+    // start empty on corrupted cache
+  }
+
+  let tgFavoritesFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleTgFavoritesFlush() {
+    if (tgFavoritesFlushTimer) return;
+    tgFavoritesFlushTimer = setTimeout(() => {
+      tgFavoritesFlushTimer = null;
+      try {
+        const obj: Record<string, TelegramFavoriteItem[]> = {};
+        for (const [uid, items] of tgUserFavorites.entries()) {
+          obj[uid] = items;
+        }
+        fs.writeFileSync(TG_FAVORITES_STORE_PATH, JSON.stringify(obj), 'utf8');
+      } catch {
+        // ignore ephemeral write failure
+      }
+    }, 1500);
+  }
+
+  function sanitizeTelegramFavoritesList(raw: unknown): TelegramFavoriteItem[] {
+    if (!Array.isArray(raw)) return [];
+    const out: TelegramFavoriteItem[] = [];
+    const seen = new Set<string>();
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      const q = typeof e.queue === 'string' ? e.queue.trim() : '';
+      if (!SUBQUEUES.includes(q as SubqueueId)) continue;
+      const label =
+        typeof e.label === 'string'
+          ? e.label.replace(/[\r\n<>]+/g, ' ').trim().slice(0, 72)
+          : '';
+      if (!label) continue;
+      const sq =
+        typeof e.secondaryQueue === 'string' && SUBQUEUES.includes(e.secondaryQueue as SubqueueId)
+          ? (e.secondaryQueue as SubqueueId)
+          : undefined;
+      const dt =
+        typeof e.dualType === 'string' && VALID_DUAL_TYPES.includes(e.dualType as DualQueueType)
+          ? (e.dualType as DualQueueType)
+          : undefined;
+      const isHome = e.isHome === true;
+      const dedupKey = `${label.toLowerCase()}|${q}|${sq || ''}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      out.push({
+        label,
+        queue: q as SubqueueId,
+        ...(sq && sq !== q ? { secondaryQueue: sq } : {}),
+        ...(dt && dt !== 'none' ? { dualType: dt } : {}),
+        ...(isHome ? { isHome: true } : {}),
+      });
+      if (out.length >= TG_FAVORITES_MAX_ITEMS) break;
+    }
+    return out;
+  }
+
+  function getTelegramUserFavorites(userId: number): TelegramFavoriteItem[] {
+    return tgUserFavorites.get(String(userId)) || [];
+  }
+
+  function setTelegramUserFavorites(
+    userId: number,
+    items: TelegramFavoriteItem[]
+  ): TelegramFavoriteItem[] {
+    const clean = sanitizeTelegramFavoritesList(items);
+    const key = String(userId);
+    if (clean.length === 0) {
+      tgUserFavorites.delete(key);
+    } else {
+      if (!tgUserFavorites.has(key) && tgUserFavorites.size >= TG_FAVORITES_MAX_USERS) {
+        const oldest = tgUserFavorites.keys().next().value;
+        if (oldest) tgUserFavorites.delete(oldest);
+      }
+      tgUserFavorites.set(key, clean);
+    }
+    scheduleTgFavoritesFlush();
+    return clean;
+  }
+
+  function toggleTelegramUserFavoriteQueue(
+    userId: number,
+    queue: SubqueueId
+  ): { added: boolean; items: TelegramFavoriteItem[] } {
+    const current = getTelegramUserFavorites(userId);
+    const existingIdx = current.findIndex(
+      (f) => f.queue === queue && !f.secondaryQueue && f.label === `Черга ${queue.replace('-', '.')}`
+    );
+    const anyWithQueueIdx = current.findIndex((f) => f.queue === queue);
+    if (existingIdx !== -1) {
+      const next = current.filter((_, i) => i !== existingIdx);
+      return { added: false, items: setTelegramUserFavorites(userId, next) };
+    }
+    if (anyWithQueueIdx !== -1 && current.length >= TG_FAVORITES_MAX_ITEMS) {
+      return { added: false, items: current };
+    }
+    const next: TelegramFavoriteItem[] = [
+      ...current,
+      { label: `Черга ${queue.replace('-', '.')}`, queue },
+    ];
+    return { added: true, items: setTelegramUserFavorites(userId, next) };
+  }
+
+  app.get('/api/telegram/favorites', (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const session = token ? verifyTelegramSessionToken(token) : null;
+    res.setHeader('Cache-Control', 'no-store');
+    if (!session) {
+      res.status(401).json({ error: 'Потрібна авторизація Telegram' });
+      return;
+    }
+    res.json({ favorites: getTelegramUserFavorites(session.id) });
+  });
+
+  app.post('/api/telegram/favorites', express.json({ limit: '16kb' }), (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const session = token ? verifyTelegramSessionToken(token) : null;
+    res.setHeader('Cache-Control', 'no-store');
+    if (!session) {
+      res.status(401).json({ error: 'Потрібна авторизація Telegram' });
+      return;
+    }
+    const body = req.body as { favorites?: unknown } | undefined;
+    const saved = setTelegramUserFavorites(session.id, sanitizeTelegramFavoritesList(body?.favorites));
+    res.json({ ok: true, count: saved.length, favorites: saved });
+  });
+
   const telegramBotStatus = initTelegramBot({
     app,
     getDpemPayload: () => fetchDpemPayload(false),
+    getUserFavorites: getTelegramUserFavorites,
+    toggleUserFavoriteQueue: toggleTelegramUserFavoriteQueue,
   });
 
   app.get('/api/auth/telegram/config', (_req, res) => {
@@ -847,6 +1189,11 @@ async function startServer() {
           photoUrl: sanitizeHttpsUrl(parsedUser?.photo_url),
           isTelegramAdmin: adminIds.has(id),
         };
+        const tgDisplayName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+        const tgAuditLabel = sanitizeAuthLabel(
+          `${tgDisplayName}${profile.username ? ` (@${profile.username})` : ''} · ID ${profile.id}`
+        );
+        recordAuditVisit(`tg_${profile.id}`, true, 'telegram', tgAuditLabel);
         const token = signTelegramSessionToken(profile);
         res.json({
           verified: true,
@@ -906,6 +1253,11 @@ async function startServer() {
         photoUrl: sanitizeHttpsUrl(w.photo_url),
         isTelegramAdmin: adminIds.has(id),
       };
+      const tgDisplayName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+      const tgAuditLabel = sanitizeAuthLabel(
+        `${tgDisplayName}${profile.username ? ` (@${profile.username})` : ''} · ID ${profile.id}`
+      );
+      recordAuditVisit(`tg_${profile.id}`, true, 'telegram', tgAuditLabel);
       const token = signTelegramSessionToken(profile);
       res.json({
         verified: true,
@@ -936,7 +1288,8 @@ async function startServer() {
   }
 
   const PUBLIC_POINTS_PATH =
-    process.env.PUBLIC_POINTS_PATH?.trim() || '/tmp/dpem_public_manual_points_v1.json';
+    process.env.PUBLIC_POINTS_PATH?.trim() ||
+    path.join(SERVER_DATA_DIR, 'dpem_public_manual_points_v1.json');
   const PUBLIC_POINTS_MAX = 500;
   const PUBLIC_POINT_DEDUP_METERS = 15;
   const PUBLIC_POINT_RATE_WINDOW_MS = 60 * 60 * 1000;

@@ -6,6 +6,7 @@ import {
   Layers,
   MapPin,
   Pencil,
+  Sparkles,
   Star,
   Trash2,
   Zap,
@@ -14,6 +15,11 @@ import {
 import { CalendarDatePicker } from './CalendarDatePicker';
 import { resolveBuilding, ResolverContext, stateColor, stateLabel } from '../lib/resolver';
 import {
+  ForecastDayResult,
+  formatShiftSlotsUk,
+  ScheduleShiftModel,
+} from '../lib/scheduleForecast';
+import {
   buildMergedIntervals,
   computeScheduleTotals,
   formatDurationShort,
@@ -21,6 +27,7 @@ import {
 } from '../lib/scheduleIntervals';
 import {
   BuildingRecord,
+  DualQueueType,
   FavoriteAddress,
   formatSlotTime,
   formatSubqueue,
@@ -49,6 +56,10 @@ interface FavoritesWatchPageProps {
   onFlyToHome: () => void;
   onUpdateFavoriteNote: (key: string, note: string) => void;
   onRemoveFavorite: (key: string) => void;
+  forecastInfo?: ForecastDayResult | null;
+  shiftModel?: ScheduleShiftModel | null;
+  customShiftSlots?: number | null;
+  onChangeCustomShiftSlots?: (slots: number | null) => void;
 }
 
 interface WatchedItem {
@@ -59,11 +70,57 @@ interface WatchedItem {
   isHome: boolean;
   favorite?: FavoriteAddress;
   queue: SubqueueId | null;
+  secondaryQueue: SubqueueId | null;
+  dualType: DualQueueType;
   feeder?: string;
   schedule: SlotState[];
+  secondarySchedule: SlotState[];
   currentState: SlotState;
+  secondaryCurrentState: SlotState | null;
   nextChangeLabel: string;
   countdown: string;
+  secondaryNextChangeLabel: string | null;
+  secondaryCountdown: string | null;
+}
+
+function getDualRoleLabels(dualType: DualQueueType): {
+  primaryShort: string;
+  secondaryShort: string;
+  secondaryFull: string;
+} {
+  if (dualType === 'split_lifts') {
+    return {
+      primaryShort: 'Квартири',
+      secondaryShort: 'Ліфти',
+      secondaryFull: 'Ліфти / МОП',
+    };
+  }
+  if (dualType === 'split_entrances') {
+    return {
+      primaryShort: 'Підʼїзд 1',
+      secondaryShort: 'Підʼїзд 2',
+      secondaryFull: 'Інші підʼїзди',
+    };
+  }
+  return {
+    primaryShort: 'Основна',
+    secondaryShort: '2-га черга',
+    secondaryFull: '2-га / резервна черга',
+  };
+}
+
+function secondaryStateColor(state: SlotState): string {
+  switch (state) {
+    case 'off':
+      return '#9333ea'; // distinct violet for secondary queue OFF
+    case 'switch_off':
+    case 'switch_on':
+      return '#d97706'; // amber for secondary switching
+    case 'possible':
+      return '#c084fc'; // light violet for possible
+    default:
+      return '#0ea5e9'; // distinct sky-blue for secondary queue ON
+  }
 }
 
 function computeCountdownMerged(
@@ -145,6 +202,10 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
   onFlyToHome,
   onUpdateFavoriteNote,
   onRemoveFavorite,
+  forecastInfo = null,
+  shiftModel = null,
+  customShiftSlots = null,
+  onChangeCustomShiftSlots,
 }) => {
   const [now, setNow] = useState<Date>(() => new Date());
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -169,6 +230,8 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
       favorite?: FavoriteAddress
     ): WatchedItem => {
       let queue: SubqueueId | null = null;
+      let secondaryQueue: SubqueueId | null = null;
+      let dualType: DualQueueType = 'none';
       let feeder: string | undefined;
 
       if (mp) {
@@ -180,22 +243,40 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
       } else if (b) {
         const info = resolveBuilding(b.street, b.house, resolverCtx);
         queue = info?.primary || null;
+        secondaryQueue =
+          info?.secondary && info.secondary !== info.primary ? info.secondary : null;
+        dualType = info?.dualType || 'none';
         feeder = info?.feeder;
       } else if (favorite) {
-        if (favorite.queue) {
+        const info = !favorite.key.startsWith('manual|')
+          ? resolveBuilding(favorite.street, favorite.house, resolverCtx)
+          : null;
+        if (info) {
+          queue = info.primary;
+          secondaryQueue = info.secondary && info.secondary !== info.primary ? info.secondary : null;
+          dualType = info.dualType || 'none';
+          feeder = info.feeder;
+        } else if (favorite.queue) {
           queue = favorite.queue;
           feeder = favorite.feeder;
         } else {
-          const info = resolveBuilding(favorite.street, favorite.house, resolverCtx);
-          queue = info?.primary || extractQueueFromNote(favorite.note);
-          feeder = info?.feeder;
+          queue = extractQueueFromNote(favorite.note);
         }
       }
 
       const schedule = queue ? queuesMap[queue] || [] : [];
+      const secondarySchedule = secondaryQueue ? queuesMap[secondaryQueue] || [] : [];
       const rawCurrent = schedule[currentSlot] || 'on';
       const currentState = normalizeDisplayState(rawCurrent, mergedLightDark);
       const cd = computeCountdownMerged(schedule, currentSlot, now, mergedLightDark);
+
+      const hasSecondary = Boolean(secondaryQueue && secondarySchedule.length >= 48);
+      const secondaryCurrentState = hasSecondary
+        ? normalizeDisplayState(secondarySchedule[currentSlot] || 'on', mergedLightDark)
+        : null;
+      const secondaryCd = hasSecondary
+        ? computeCountdownMerged(secondarySchedule, currentSlot, now, mergedLightDark)
+        : null;
 
       return {
         id: favorite?.id || `home_${key}`,
@@ -205,11 +286,17 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
         isHome,
         favorite,
         queue,
+        secondaryQueue,
+        dualType,
         feeder,
         schedule,
+        secondarySchedule,
         currentState,
+        secondaryCurrentState,
         nextChangeLabel: cd.label,
         countdown: cd.countdown,
+        secondaryNextChangeLabel: secondaryCd?.label || null,
+        secondaryCountdown: secondaryCd?.countdown || null,
       };
     };
 
@@ -263,7 +350,17 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
   }, [myHomeKey, favorites, buildings, manualPoints, resolverCtx, queuesMap, currentSlot, mergedLightDark, now]);
 
   const anySwitchingToday = useMemo(
-    () => watchedItems.some((item) => item.schedule.some((s) => s === 'switch_off' || s === 'switch_on')),
+    () =>
+      watchedItems.some(
+        (item) =>
+          item.schedule.some((s) => s === 'switch_off' || s === 'switch_on') ||
+          item.secondarySchedule.some((s) => s === 'switch_off' || s === 'switch_on')
+      ),
+    [watchedItems]
+  );
+
+  const anyDualQueue = useMemo(
+    () => watchedItems.some((item) => Boolean(item.secondaryQueue)),
     [watchedItems]
   );
 
@@ -300,6 +397,8 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
               availableDates={availableDates}
               selectedDate={selectedDate}
               onSelectDate={onSelectDate}
+              allowForecast
+              isForecastDate={Boolean(forecastInfo?.isForecast)}
             />
 
             <button
@@ -318,8 +417,61 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
           </div>
         </div>
 
+        {/* Forecast Banner when viewing a future / predicted calendar date */}
+        {forecastInfo?.isForecast && (
+          <div className="px-3.5 py-2.5 rounded-xl bg-violet-50 dark:bg-violet-950/40 border border-violet-300/80 dark:border-violet-800/70 text-xs text-violet-950 dark:text-violet-100 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-start gap-2 min-w-0">
+              <Sparkles className="w-4 h-4 text-violet-600 dark:text-violet-400 shrink-0 mt-0.5" />
+              <div className="space-y-0.5 min-w-0">
+                <div className="font-semibold">
+                  Прогноз на {selectedDate} (
+                  {forecastInfo.daysOffset >= 0
+                    ? `+${forecastInfo.daysOffset}`
+                    : forecastInfo.daysOffset}{' '}
+                  дн. від {forecastInfo.anchorDate})
+                </div>
+                <div className="text-[11px] text-violet-800/90 dark:text-violet-300/90">
+                  {forecastInfo.summaryUk}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onChangeCustomShiftSlots && (
+                <select
+                  value={customShiftSlots === null ? 'auto' : String(customShiftSlots)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onChangeCustomShiftSlots(v === 'auto' ? null : Number(v));
+                  }}
+                  aria-label="Крок добового зміщення"
+                  className="bg-white dark:bg-[#0b1120] border border-violet-300 dark:border-violet-700 rounded-md px-2 py-1 text-[11px] font-mono text-violet-900 dark:text-violet-100 focus:outline-none focus:border-violet-500"
+                >
+                  <option value="auto">
+                    Авто ({shiftModel ? formatShiftSlotsUk(shiftModel.dailyTimeShiftSlots) : '+2 год/добу'})
+                  </option>
+                  {[-8, -6, -4, -2, 0, 2, 4, 6, 8].map((s) => (
+                    <option key={s} value={String(s)}>
+                      {formatShiftSlotsUk(s)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {availableDates[0] && (
+                <button
+                  type="button"
+                  onClick={() => onSelectDate(availableDates[0])}
+                  className="px-2.5 py-1 rounded-md bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-semibold transition-colors whitespace-nowrap"
+                >
+                  Повернутись до офіц. ({availableDates[0].slice(5)})
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Helpful Banner if Switching is Rare */}
-        {!anySwitchingToday && watchedItems.length > 0 && (
+        {!forecastInfo?.isForecast && !anySwitchingToday && watchedItems.length > 0 && (
           <div className="px-3.5 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 text-xs text-emerald-800 dark:text-emerald-300 flex items-center justify-between gap-2">
             <span>
               Сьогодні перемикань немає — графік автоматично згруповано у чисті інтервали «Зі світлом / Без світла».
@@ -358,13 +510,23 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                   <Clock className="w-3.5 h-3.5 text-sky-500" />
                   <span>Порівняння по годинах (00:00 — 24:00)</span>
                 </h2>
-                <div className="flex items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
                   <span className="inline-flex items-center gap-1">
                     <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" /> Зі світлом
                   </span>
                   <span className="inline-flex items-center gap-1">
                     <span className="w-2.5 h-2.5 rounded-xs bg-red-500 inline-block" /> Без світла
                   </span>
+                  {anyDualQueue && (
+                    <>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs bg-sky-500 inline-block" /> 2-га / Ліфти: є
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs bg-purple-600 inline-block" /> 2-га / Ліфти: без
+                      </span>
+                    </>
+                  )}
                   {!mergedLightDark && (
                     <span className="inline-flex items-center gap-1">
                       <span className="w-2.5 h-2.5 rounded-xs bg-orange-500 inline-block" /> Перемик.
@@ -385,67 +547,125 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
 
                 {watchedItems.map((item) => {
                   const intervals = buildMergedIntervals(item.schedule, mergedLightDark);
+                  const secondaryIntervals =
+                    item.secondaryQueue && item.secondarySchedule.length >= 48
+                      ? buildMergedIntervals(item.secondarySchedule, mergedLightDark)
+                      : [];
+                  const hasSecondaryRow = Boolean(item.secondaryQueue && secondaryIntervals.length > 0);
+                  const dualLabels = getDualRoleLabels(item.dualType);
                   const cursorPct = ((currentSlot + 0.5) / 48) * 100;
 
                   return (
                     <div
                       key={`matrix_${item.key}`}
-                      className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3"
+                      className={`space-y-1 ${
+                        hasSecondaryRow
+                          ? 'pb-1.5 border-b border-slate-100 dark:border-slate-800/70 last:border-b-0 last:pb-0'
+                          : ''
+                      }`}
                     >
-                      <div className="sm:w-40 shrink-0 flex items-center justify-between sm:justify-start gap-1.5 min-w-0">
-                        <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1">
-                          {item.isHome && <Home className="w-3 h-3 text-sky-500 shrink-0" />}
-                          <span className="truncate">{item.note || item.title}</span>
-                        </span>
-                        {item.queue && (
-                          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 shrink-0">
-                            {formatSubqueue(item.queue)}
+                      {/* Primary Queue Row */}
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+                        <div className="sm:w-40 shrink-0 flex items-center justify-between sm:justify-start gap-1.5 min-w-0">
+                          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1">
+                            {item.isHome && <Home className="w-3 h-3 text-sky-500 shrink-0" />}
+                            <span className="truncate">{item.note || item.title}</span>
                           </span>
-                        )}
+                          {item.queue && (
+                            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 shrink-0">
+                              {formatSubqueue(item.queue)}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="relative flex-1 h-7 rounded-md overflow-hidden border border-slate-200 dark:border-slate-700/80 flex bg-slate-100 dark:bg-slate-900">
+                          {intervals.length === 0 ? (
+                            <div className="flex-1 flex items-center justify-center text-[11px] text-slate-400">
+                              Немає даних черги
+                            </div>
+                          ) : (
+                            intervals.map((seg) => {
+                              const widthPct = ((seg.endSlot - seg.startSlot) / 48) * 100;
+                              const isLight = seg.state === 'on';
+                              const isOff = seg.state === 'off';
+                              return (
+                                <button
+                                  key={`${seg.startSlot}-${seg.endSlot}`}
+                                  type="button"
+                                  onClick={() => onSelectSlot(seg.startSlot)}
+                                  style={{
+                                    width: `${widthPct}%`,
+                                    backgroundColor: stateColor(seg.state),
+                                  }}
+                                  className="h-full relative group border-r border-white/25 dark:border-slate-950/35 last:border-r-0 flex items-center justify-center overflow-hidden transition-opacity hover:opacity-90"
+                                  title={`${hasSecondaryRow ? `${dualLabels.primaryShort} (${formatSubqueue(item.queue!)}) · ` : ''}${seg.startTime}–${seg.endTime}: ${stateLabel(seg.state)} (${formatDurationShort(seg.durationMin)})`}
+                                >
+                                  {widthPct >= 14 && (
+                                    <span
+                                      className={`text-[10px] font-mono font-bold px-1 truncate ${
+                                        isLight || isOff ? 'text-white' : 'text-slate-950'
+                                      }`}
+                                    >
+                                      {seg.startTime}–{seg.endTime}
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })
+                          )}
+
+                          {/* Active slot indicator line */}
+                          <div
+                            className="absolute top-0 bottom-0 w-0.5 bg-white dark:bg-sky-300 shadow-[0_0_6px_rgba(0,0,0,0.9)] pointer-events-none"
+                            style={{ left: `${cursorPct}%` }}
+                          />
+                        </div>
                       </div>
 
-                      <div className="relative flex-1 h-7 rounded-md overflow-hidden border border-slate-200 dark:border-slate-700/80 flex bg-slate-100 dark:bg-slate-900">
-                        {intervals.length === 0 ? (
-                          <div className="flex-1 flex items-center justify-center text-[11px] text-slate-400">
-                            Немає даних черги
+                      {/* Secondary Queue Row (e.g., Lifts / 2nd entrance / Backup) in distinct Sky/Violet palette */}
+                      {hasSecondaryRow && item.secondaryQueue && (
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+                          <div className="sm:w-40 shrink-0 flex items-center justify-between sm:justify-end gap-1.5 min-w-0 pl-2 sm:pl-0">
+                            <span className="text-[11px] font-medium text-purple-700 dark:text-purple-300 truncate">
+                              ↳ {dualLabels.secondaryShort}
+                            </span>
+                            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/70 border border-purple-300/70 dark:border-purple-700/70 text-purple-800 dark:text-purple-200 shrink-0">
+                              {formatSubqueue(item.secondaryQueue)}
+                            </span>
                           </div>
-                        ) : (
-                          intervals.map((seg) => {
-                            const widthPct = ((seg.endSlot - seg.startSlot) / 48) * 100;
-                            const isLight = seg.state === 'on';
-                            const isOff = seg.state === 'off';
-                            return (
-                              <button
-                                key={`${seg.startSlot}-${seg.endSlot}`}
-                                type="button"
-                                onClick={() => onSelectSlot(seg.startSlot)}
-                                style={{
-                                  width: `${widthPct}%`,
-                                  backgroundColor: stateColor(seg.state),
-                                }}
-                                className="h-full relative group border-r border-white/25 dark:border-slate-950/35 last:border-r-0 flex items-center justify-center overflow-hidden transition-opacity hover:opacity-90"
-                                title={`${seg.startTime}–${seg.endTime}: ${stateLabel(seg.state)} (${formatDurationShort(seg.durationMin)})`}
-                              >
-                                {widthPct >= 14 && (
-                                  <span
-                                    className={`text-[10px] font-mono font-bold px-1 truncate ${
-                                      isLight || isOff ? 'text-white' : 'text-slate-950'
-                                    }`}
-                                  >
-                                    {seg.startTime}–{seg.endTime}
-                                  </span>
-                                )}
-                              </button>
-                            );
-                          })
-                        )}
 
-                        {/* Active slot indicator line */}
-                        <div
-                          className="absolute top-0 bottom-0 w-0.5 bg-white dark:bg-sky-300 shadow-[0_0_6px_rgba(0,0,0,0.9)] pointer-events-none"
-                          style={{ left: `${cursorPct}%` }}
-                        />
-                      </div>
+                          <div className="relative flex-1 h-5 rounded-md overflow-hidden border border-purple-300/80 dark:border-purple-700/70 flex bg-slate-100 dark:bg-slate-900">
+                            {secondaryIntervals.map((seg) => {
+                              const widthPct = ((seg.endSlot - seg.startSlot) / 48) * 100;
+                              return (
+                                <button
+                                  key={`sec_${seg.startSlot}-${seg.endSlot}`}
+                                  type="button"
+                                  onClick={() => onSelectSlot(seg.startSlot)}
+                                  style={{
+                                    width: `${widthPct}%`,
+                                    backgroundColor: secondaryStateColor(seg.state),
+                                  }}
+                                  className="h-full relative group border-r border-white/25 dark:border-slate-950/35 last:border-r-0 flex items-center justify-center overflow-hidden transition-opacity hover:opacity-90"
+                                  title={`${dualLabels.secondaryFull} (${formatSubqueue(item.secondaryQueue!)}) · ${seg.startTime}–${seg.endTime}: ${stateLabel(seg.state)} (${formatDurationShort(seg.durationMin)})`}
+                                >
+                                  {widthPct >= 14 && (
+                                    <span className="text-[9px] font-mono font-bold px-1 truncate text-white">
+                                      {seg.startTime}–{seg.endTime}
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+
+                            {/* Active slot indicator line */}
+                            <div
+                              className="absolute top-0 bottom-0 w-0.5 bg-white dark:bg-amber-300 shadow-[0_0_6px_rgba(0,0,0,0.9)] pointer-events-none"
+                              style={{ left: `${cursorPct}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -457,8 +677,20 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
               {watchedItems.map((item) => {
                 const intervals = buildMergedIntervals(item.schedule, mergedLightDark);
                 const totals = computeScheduleTotals(item.schedule, mergedLightDark);
+                const hasSecondary = Boolean(
+                  item.secondaryQueue && item.secondarySchedule.length >= 48
+                );
+                const secondaryIntervals = hasSecondary
+                  ? buildMergedIntervals(item.secondarySchedule, mergedLightDark)
+                  : [];
+                const secondaryTotals = hasSecondary
+                  ? computeScheduleTotals(item.secondarySchedule, mergedLightDark)
+                  : null;
+                const dualLabels = getDualRoleLabels(item.dualType);
                 const isLightNow = item.currentState === 'on';
                 const isOffNow = item.currentState === 'off';
+                const isSecLightNow = item.secondaryCurrentState === 'on';
+                const isSecOffNow = item.secondaryCurrentState === 'off';
 
                 return (
                   <article
@@ -477,7 +709,13 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                             )}
                             {item.queue && (
                               <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200">
-                                Черга {formatSubqueue(item.queue)}
+                                {hasSecondary ? `${dualLabels.primaryShort}: ` : 'Черга '}
+                                {formatSubqueue(item.queue)}
+                              </span>
+                            )}
+                            {hasSecondary && item.secondaryQueue && (
+                              <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/70 border border-purple-300/70 dark:border-purple-700/70 text-purple-800 dark:text-purple-200">
+                                {dualLabels.secondaryShort}: {formatSubqueue(item.secondaryQueue)}
                               </span>
                             )}
                           </div>
@@ -491,21 +729,40 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                           )}
                         </div>
 
-                        <div
-                          className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ${
-                            isLightNow
-                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
-                              : isOffNow
-                              ? 'bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30'
-                              : 'bg-orange-500/15 text-orange-700 dark:text-orange-300 border border-orange-500/30'
-                          }`}
-                        >
-                          {isLightNow ? (
-                            <Zap className="w-3.5 h-3.5" />
-                          ) : (
-                            <ZapOff className="w-3.5 h-3.5" />
+                        <div className="shrink-0 flex flex-col items-end gap-1">
+                          <div
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ${
+                              isLightNow
+                                ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                                : isOffNow
+                                ? 'bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30'
+                                : 'bg-orange-500/15 text-orange-700 dark:text-orange-300 border border-orange-500/30'
+                            }`}
+                          >
+                            {isLightNow ? (
+                              <Zap className="w-3.5 h-3.5" />
+                            ) : (
+                              <ZapOff className="w-3.5 h-3.5" />
+                            )}
+                            <span>{stateLabel(item.currentState)}</span>
+                          </div>
+
+                          {hasSecondary && item.secondaryCurrentState && (
+                            <div
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                isSecLightNow
+                                  ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/35'
+                                  : isSecOffNow
+                                  ? 'bg-purple-500/15 text-purple-700 dark:text-purple-300 border border-purple-500/35'
+                                  : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/35'
+                              }`}
+                            >
+                              <span>
+                                {dualLabels.secondaryShort}:{' '}
+                                {isSecLightNow ? 'є' : isSecOffNow ? 'відкл.' : 'перемик.'}
+                              </span>
+                            </div>
                           )}
-                          <span>{stateLabel(item.currentState)}</span>
                         </div>
                       </div>
 
@@ -550,6 +807,7 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                       {/* Live Countdown Strip */}
                       <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0b1120] border border-slate-200 dark:border-slate-800">
                         <span className="text-xs text-slate-600 dark:text-slate-300 truncate">
+                          {hasSecondary ? `${dualLabels.primaryShort}: ` : ''}
                           {item.nextChangeLabel}
                         </span>
                         <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100 tabular-nums shrink-0">
@@ -557,10 +815,14 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                         </span>
                       </div>
 
-                      {/* Merged Contiguous Intervals List */}
+                      {/* Merged Contiguous Intervals List (Primary Queue) */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-                          <span>Інтервали на добу</span>
+                          <span>
+                            {hasSecondary && item.queue
+                              ? `${dualLabels.primaryShort} (${formatSubqueue(item.queue)})`
+                              : 'Інтервали на добу'}
+                          </span>
                           <span className="font-mono">
                             Світло: {formatDurationShort(totals.lightMin)} · Без:{' '}
                             {formatDurationShort(totals.offMin)}
@@ -603,6 +865,68 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
                           })}
                         </div>
                       </div>
+
+                      {/* Secondary Queue Section (e.g. Lifts / 2nd entrance / Backup) */}
+                      {hasSecondary && item.secondaryQueue && secondaryTotals && (
+                        <div className="pt-2 mt-1 border-t border-dashed border-purple-200 dark:border-purple-800/70 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-semibold text-purple-700 dark:text-purple-300">
+                              {dualLabels.secondaryFull} ({formatSubqueue(item.secondaryQueue)})
+                            </span>
+                            <span className="font-mono text-slate-500 dark:text-slate-400">
+                              Є: {formatDurationShort(secondaryTotals.lightMin)} · Без:{' '}
+                              {formatDurationShort(secondaryTotals.offMin)}
+                            </span>
+                          </div>
+
+                          {item.secondaryNextChangeLabel && item.secondaryCountdown && (
+                            <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md bg-purple-50/70 dark:bg-purple-950/30 border border-purple-200/70 dark:border-purple-800/50 text-[11px]">
+                              <span className="text-purple-800 dark:text-purple-200 truncate">
+                                {item.secondaryNextChangeLabel}
+                              </span>
+                              <span className="font-mono font-bold text-purple-900 dark:text-purple-100 tabular-nums shrink-0">
+                                {item.secondaryCountdown}
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap gap-1.5">
+                            {secondaryIntervals.map((seg) => {
+                              const active =
+                                currentSlot >= seg.startSlot && currentSlot < seg.endSlot;
+                              return (
+                                <button
+                                  key={`sec_chip_${seg.startSlot}-${seg.endSlot}`}
+                                  type="button"
+                                  onClick={() => onSelectSlot(seg.startSlot)}
+                                  className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-mono border transition-all ${
+                                    active
+                                      ? 'ring-2 ring-purple-500 border-purple-500 font-bold'
+                                      : 'border-slate-200 dark:border-slate-700/80 hover:border-purple-400'
+                                  } ${
+                                    seg.state === 'on'
+                                      ? 'bg-sky-50 dark:bg-sky-950/50 text-sky-800 dark:text-sky-300'
+                                      : seg.state === 'off'
+                                      ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-800 dark:text-purple-300'
+                                      : 'bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300'
+                                  }`}
+                                >
+                                  <span
+                                    className="w-2 h-2 rounded-full shrink-0"
+                                    style={{ backgroundColor: secondaryStateColor(seg.state) }}
+                                  />
+                                  <span>
+                                    {seg.startTime}–{seg.endTime}
+                                  </span>
+                                  <span className="opacity-70 text-[10px]">
+                                    ({formatDurationShort(seg.durationMin)})
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Card Footer Actions */}

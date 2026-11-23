@@ -12,6 +12,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   getDocFromServer,
   getFirestore,
   limit,
@@ -26,13 +27,16 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   AccessRequestRecord,
+  ArchivedDaySnapshot,
   AssignmentHistoryEntry,
   AuditEventRecord,
   AuditEventType,
   BuildingOverride,
   DualQueueType,
+  FavoriteAddress,
   FeederTransfer,
   ManualPoint,
+  ServerAuditVisit,
   SUBQUEUES,
   SubqueueId,
   UserRoleName,
@@ -338,19 +342,96 @@ export async function deleteSharedOverride(addressKey: string): Promise<void> {
   }
 }
 
-// Private per-user "My Home" preference sync
-export function subscribeUserHomePref(
+function cleanPipePart(val: string | undefined, maxLen: number): string {
+  return String(val || '')
+    .replace(/[\r\n|]+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function encodeFavoritePref(fav: FavoriteAddress): string {
+  const safeKey = String(fav.key || '').replace(/[\r\n]+/g, '').trim().slice(0, 90);
+  // key itself contains a single '|' (street|house or manual|id); replace '|' with '§' inside key
+  const escapedKey = safeKey.replace(/\|/g, '§');
+  const buildingId = cleanPipePart(fav.buildingId, 48);
+  const street = cleanPipePart(fav.street, 56);
+  const house = cleanPipePart(fav.house, 18);
+  const label = cleanPipePart(fav.label, 48);
+  const note = cleanPipePart(fav.note, 64);
+  const queue = fav.queue && SUBQUEUES.includes(fav.queue) ? fav.queue : '';
+  const feeder = cleanPipePart(fav.feeder, 44);
+  const lat = Number.isFinite(fav.lat) ? Number(fav.lat.toFixed(6)) : 0;
+  const lng = Number.isFinite(fav.lng) ? Number(fav.lng.toFixed(6)) : 0;
+  const savedAt = cleanPipePart(fav.savedAt, 28);
+  return [escapedKey, buildingId, street, house, label, note, queue, feeder, lat, lng, savedAt]
+    .join('|')
+    .slice(0, 315);
+}
+
+function decodeFavoritePref(raw: string, idx: number): FavoriteAddress | null {
+  if (typeof raw !== 'string' || !raw.includes('|')) return null;
+  const parts = raw.split('|');
+  if (parts.length < 10) return null;
+  const key = parts[0].replace(/§/g, '|').trim();
+  if (!key) return null;
+  const buildingId = parts[1].trim() || key;
+  const street = parts[2].trim();
+  const house = parts[3].trim();
+  const label = parts[4].trim() || undefined;
+  const note = parts[5].trim();
+  const queueRaw = parts[6].trim();
+  const queue = SUBQUEUES.includes(queueRaw as SubqueueId) ? (queueRaw as SubqueueId) : undefined;
+  const feeder = parts[7].trim() || undefined;
+  const lat = Number(parts[8]);
+  const lng = Number(parts[9]);
+  const savedAt = (parts[10] || '').trim() || new Date().toISOString();
+  if (!street && !label) return null;
+  return {
+    id: `fav_cloud_${idx}_${key.slice(0, 24)}`,
+    key,
+    buildingId,
+    street: street || label || '',
+    house,
+    label,
+    note,
+    queue,
+    feeder,
+    lat: Number.isFinite(lat) ? lat : 0,
+    lng: Number.isFinite(lng) ? lng : 0,
+    savedAt,
+  };
+}
+
+// Private per-user preferences sync ("My Home" + Favorites across devices on the same account)
+export function subscribeUserPrefs(
   uid: string,
-  onData: (homeKey: string | null) => void
+  onData: (prefs: { myHomeKey: string | null; favorites: FavoriteAddress[] | null }) => void
 ): Unsubscribe {
   const path = `userPrefs/${uid}`;
   return onSnapshot(
     doc(db, 'userPrefs', uid),
     (snap) => {
-      if (snap.exists()) {
-        const key = snap.data()?.myHomeKey;
-        onData(typeof key === 'string' && key.length > 0 ? key : null);
+      if (!snap.exists()) {
+        onData({ myHomeKey: null, favorites: null });
+        return;
       }
+      const data = snap.data();
+      const key = typeof data?.myHomeKey === 'string' && data.myHomeKey.length > 0 ? data.myHomeKey : null;
+      let favorites: FavoriteAddress[] | null = null;
+      if (Array.isArray(data?.favorites)) {
+        const decoded: FavoriteAddress[] = [];
+        const seen = new Set<string>();
+        data.favorites.forEach((raw: unknown, idx: number) => {
+          if (typeof raw !== 'string') return;
+          const item = decodeFavoritePref(raw, idx);
+          if (item && !seen.has(item.key)) {
+            seen.add(item.key);
+            decoded.push(item);
+          }
+        });
+        favorites = decoded;
+      }
+      onData({ myHomeKey: key, favorites });
     },
     (error) => {
       handleFirestoreError(error, OperationType.GET, path);
@@ -360,11 +441,47 @@ export function subscribeUserHomePref(
 
 export async function saveUserHomePref(uid: string, myHomeKey: string): Promise<void> {
   const path = `userPrefs/${uid}`;
+  const ref = doc(db, 'userPrefs', uid);
   try {
-    await setDoc(doc(db, 'userPrefs', uid), {
-      myHomeKey: myHomeKey.slice(0, 160),
-      updatedAt: serverTimestamp(),
-    });
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        myHomeKey: myHomeKey.slice(0, 160),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        myHomeKey: myHomeKey.slice(0, 160),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function saveUserFavoritesPref(
+  uid: string,
+  favorites: FavoriteAddress[],
+  fallbackHomeKey = ''
+): Promise<void> {
+  const path = `userPrefs/${uid}`;
+  const ref = doc(db, 'userPrefs', uid);
+  const encoded = favorites.slice(0, 30).map(encodeFavoritePref);
+  try {
+    const existingSnap = await getDoc(ref);
+    if (existingSnap.exists()) {
+      await updateDoc(ref, {
+        favorites: encoded,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(ref, {
+        myHomeKey: fallbackHomeKey.slice(0, 160),
+        favorites: encoded,
+        updatedAt: serverTimestamp(),
+      });
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -689,6 +806,316 @@ export function subscribeAuditEvents(
       }
     }
   );
+}
+
+export async function getFirebaseIdToken(): Promise<string | null> {
+  const user = auth.currentUser;
+  if (!user) return null;
+  try {
+    return await user.getIdToken();
+  } catch {
+    return null;
+  }
+}
+
+function formatUtcDayKey(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function encodeVisitArchiveEntry(v: ServerAuditVisit): string {
+  const safeTs = Math.floor(v.ts);
+  const authFlag = v.isAuthenticated ? '1' : '0';
+  const safeTag =
+    String(v.visitorTag || 'anon')
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 16) || 'anon';
+  const base = `${safeTs}|${authFlag}|${safeTag}`;
+  if (!v.isAuthenticated || (!v.authProvider && !v.authLabel)) {
+    return base;
+  }
+  const prov = v.authProvider === 'google' || v.authProvider === 'telegram' ? v.authProvider : '';
+  const cleanLabel = String(v.authLabel || '')
+    .replace(/[\r\n|]+/g, ' ')
+    .trim()
+    .slice(0, 105);
+  return `${base}|${prov}|${cleanLabel}`.slice(0, 155);
+}
+
+function decodeVisitArchiveEntry(raw: string): ServerAuditVisit | null {
+  if (typeof raw !== 'string') return null;
+  const parts = raw.split('|');
+  if (parts.length < 3) return null;
+  const ts = Number(parts[0]);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const isAuthenticated = parts[1] === '1';
+  const visitorTag = parts[2].replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16) || 'anon';
+  const provRaw = parts[3];
+  const authProvider =
+    provRaw === 'google' || provRaw === 'telegram' ? provRaw : undefined;
+  const authLabel = parts.length >= 5 && parts[4].trim() ? parts[4].trim() : undefined;
+  return {
+    ts,
+    isAuthenticated,
+    visitorTag,
+    ...(authProvider ? { authProvider } : {}),
+    ...(authLabel ? { authLabel } : {}),
+  };
+}
+
+function visitDedupFingerprint(v: ServerAuditVisit): string {
+  // 1-minute bucket + auth state + visitorTag ensures idempotent archive merging
+  return `${Math.floor(v.ts / 60_000)}|${v.isAuthenticated ? '1' : '0'}|${v.visitorTag}`;
+}
+
+// Super-Admin-only: load daily visit archives from Firestore (survives ephemeral container redeploys)
+export async function loadAuditVisitArchives(days = 14): Promise<ServerAuditVisit[]> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified || user.email?.toLowerCase() !== 'derevyov@gmail.com') {
+    return [];
+  }
+
+  const clampedDays = Math.max(1, Math.min(30, days));
+  const now = Date.now();
+  const dayKeys: string[] = [];
+  for (let i = 0; i < clampedDays; i++) {
+    dayKeys.push(formatUtcDayKey(now - i * 24 * 60 * 60 * 1000));
+  }
+
+  const visits: ServerAuditVisit[] = [];
+  const results = await Promise.allSettled(
+    dayKeys.map((dayKey) => getDoc(doc(db, 'auditVisitArchives', dayKey)))
+  );
+
+  for (const res of results) {
+    if (res.status !== 'fulfilled' || !res.value.exists()) continue;
+    const data = res.value.data();
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    for (const raw of entries) {
+      if (typeof raw !== 'string') continue;
+      const decoded = decodeVisitArchiveEntry(raw);
+      if (decoded) visits.push(decoded);
+    }
+  }
+
+  visits.sort((a, b) => a.ts - b.ts);
+  return visits;
+}
+
+// Super-Admin-only: persist live server visits into Firestore daily archives so redeploys never wipe history
+export async function syncAuditVisitArchives(liveVisits: ServerAuditVisit[]): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified || user.email?.toLowerCase() !== 'derevyov@gmail.com') {
+    return;
+  }
+  if (!Array.isArray(liveVisits) || liveVisits.length === 0) return;
+
+  const byDay = new Map<string, ServerAuditVisit[]>();
+  for (const v of liveVisits) {
+    if (!Number.isFinite(v.ts) || v.ts <= 0) continue;
+    const dayKey = formatUtcDayKey(v.ts);
+    if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dayKey)) continue;
+    const arr = byDay.get(dayKey) || [];
+    arr.push(v);
+    byDay.set(dayKey, arr);
+  }
+
+  for (const [dayKey, dayLive] of byDay.entries()) {
+    const ref = doc(db, 'auditVisitArchives', dayKey);
+    const path = `auditVisitArchives/${dayKey}`;
+    try {
+      const snap = await getDoc(ref);
+      const existingVisits: ServerAuditVisit[] = [];
+      const existingFingerprints = new Set<string>();
+
+      if (snap.exists()) {
+        const rawEntries = Array.isArray(snap.data().entries) ? snap.data().entries : [];
+        for (const raw of rawEntries) {
+          if (typeof raw !== 'string') continue;
+          const decoded = decodeVisitArchiveEntry(raw);
+          if (decoded) {
+            existingVisits.push(decoded);
+            existingFingerprints.add(visitDedupFingerprint(decoded));
+          }
+        }
+      }
+
+      let addedNew = false;
+      const merged = [...existingVisits];
+      for (const v of dayLive) {
+        const fp = visitDedupFingerprint(v);
+        if (existingFingerprints.has(fp)) continue;
+        existingFingerprints.add(fp);
+        merged.push(v);
+        addedNew = true;
+      }
+
+      if (!addedNew && snap.exists()) continue;
+
+      merged.sort((a, b) => a.ts - b.ts);
+      const encoded = merged.slice(-500).map(encodeVisitArchiveEntry);
+      if (encoded.length === 0) continue;
+
+      if (snap.exists()) {
+        await updateDoc(ref, {
+          entries: encoded,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(ref, {
+          dayKey,
+          entries: encoded,
+          updatedByUid: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      try {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      } catch {
+        // Non-blocking background sync
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Persistent Cloud Analytics Archive (48-slot masks survive server redeploys)
+// ============================================================================
+
+function encodeAnalyticsQueueEntry(
+  q: SubqueueId,
+  day: ArchivedDaySnapshot
+): string | null {
+  const mask = day.queueOffSlotMask?.[q];
+  if (!mask || !/^[0-4]{48}$/.test(mask)) return null;
+  const offH = Number((day.queueOffHours[q] ?? 0).toFixed(1));
+  const swOffH = Number((day.queueSwitchOffHours[q] ?? 0).toFixed(1));
+  const swOnH = Number((day.queueSwitchOnHours[q] ?? 0).toFixed(1));
+  const possH = Number((day.queuePossibleHours[q] ?? 0).toFixed(1));
+  return `${q}|${offH}|${swOffH}|${swOnH}|${possH}|${mask}`;
+}
+
+function decodeAnalyticsDayDoc(dayKey: string, data: Record<string, unknown>): ArchivedDaySnapshot | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) return null;
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  if (entries.length === 0) return null;
+
+  const queueOffHours: Partial<Record<SubqueueId, number>> = {};
+  const queueSwitchOffHours: Partial<Record<SubqueueId, number>> = {};
+  const queueSwitchOnHours: Partial<Record<SubqueueId, number>> = {};
+  const queuePossibleHours: Partial<Record<SubqueueId, number>> = {};
+  const queueOffSlotMask: Partial<Record<SubqueueId, string>> = {};
+
+  for (const raw of entries) {
+    if (typeof raw !== 'string') continue;
+    const parts = raw.split('|');
+    if (parts.length < 6) continue;
+    const q = parts[0] as SubqueueId;
+    if (!SUBQUEUES.includes(q)) continue;
+    const offH = Number(parts[1]);
+    const swOffH = Number(parts[2]);
+    const swOnH = Number(parts[3]);
+    const possH = Number(parts[4]);
+    const mask = parts[5];
+    if (!/^[0-4]{48}$/.test(mask)) continue;
+    queueOffHours[q] = Number.isFinite(offH) ? offH : 0;
+    queueSwitchOffHours[q] = Number.isFinite(swOffH) ? swOffH : 0;
+    queueSwitchOnHours[q] = Number.isFinite(swOnH) ? swOnH : 0;
+    queuePossibleHours[q] = Number.isFinite(possH) ? possH : 0;
+    queueOffSlotMask[q] = mask;
+  }
+
+  if (Object.keys(queueOffSlotMask).length === 0) return null;
+  const srcRaw = data.source;
+  const source: ArchivedDaySnapshot['source'] =
+    srcRaw === 'live' || srcRaw === 'fallback' || srcRaw === 'local-html' ? srcRaw : 'live';
+
+  return {
+    date: dayKey,
+    queueOffHours,
+    queueSwitchOffHours,
+    queueSwitchOnHours,
+    queuePossibleHours,
+    queueOffSlotMask,
+    source,
+    updatedAt: timestampToIso(data.updatedAt),
+  };
+}
+
+// Public read of up to 35 archived DPEM schedule days with 48-slot masks
+export async function loadCloudAnalyticsArchive(): Promise<ArchivedDaySnapshot[]> {
+  try {
+    const q = query(
+      collection(db, 'analyticsArchive'),
+      where('dayKey', '>=', '2020-01-01'),
+      where('dayKey', '<=', '2099-12-31'),
+      limit(35)
+    );
+    const snap = await getDocs(q);
+    const days: ArchivedDaySnapshot[] = [];
+    snap.forEach((docSnap) => {
+      const decoded = decodeAnalyticsDayDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+      if (decoded) days.push(decoded);
+    });
+    return days.sort((a, b) => a.date.localeCompare(b.date));
+  } catch {
+    return [];
+  }
+}
+
+// Super-Admin-only background archival of daily 48-slot DPEM schedules to Firestore
+export async function syncCloudAnalyticsArchive(days: ArchivedDaySnapshot[]): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.emailVerified || user.email?.toLowerCase() !== 'derevyov@gmail.com') {
+    return;
+  }
+  if (!Array.isArray(days) || days.length === 0) return;
+
+  for (const day of days.slice(-35)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day.date)) continue;
+    const entries: string[] = [];
+    for (const q of SUBQUEUES) {
+      const enc = encodeAnalyticsQueueEntry(q, day);
+      if (enc) entries.push(enc);
+    }
+    if (entries.length === 0) continue;
+
+    const ref = doc(db, 'analyticsArchive', day.date);
+    try {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const existingData = snap.data();
+        const existingEntries = Array.isArray(existingData.entries) ? existingData.entries : [];
+        const existingSrc = existingData.source;
+        const samePayload =
+          existingEntries.length === entries.length &&
+          existingEntries.every((val: unknown, i: number) => val === entries[i]);
+        if (samePayload && existingSrc === day.source) continue;
+        // Never overwrite 'live' cloud data with 'fallback'
+        if (existingSrc === 'live' && day.source === 'fallback') continue;
+
+        await updateDoc(ref, {
+          entries,
+          source: day.source,
+          updatedByUid: user.uid,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(ref, {
+          dayKey: day.date,
+          entries,
+          source: day.source,
+          updatedByUid: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch {
+      // Non-blocking background sync
+    }
+  }
 }
 
 // ============================================================================

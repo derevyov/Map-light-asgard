@@ -406,15 +406,96 @@
       },
       "required": ["eventType", "summary", "actorUid", "createdAt"]
     },
+    "AuditVisitArchive": {
+      "title": "AuditVisitArchive",
+      "description": "Daily zero-PII visit history archive persisted in Firestore so visit analytics survive ephemeral server container redeploys.",
+      "type": "object",
+      "properties": {
+        "dayKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "ISO UTC/Kyiv calendar date key (YYYY-MM-DD)."
+        },
+        "entries": {
+          "type": "array",
+          "description": "Bounded list (1..500) of compact visit strings formatted as '<epochMs>|<0|1>|<visitorTag>[|<provider>|<loginLabel>]' (max 160 chars each)."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the Super Admin who synced this archive."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when first archived."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": ["dayKey", "entries", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "AnalyticsDayArchive": {
+      "title": "AnalyticsDayArchive",
+      "description": "Public daily DPEM schedule snapshot with 48-slot outage masks persisted in Firestore for historical pattern analysis across server redeploys.",
+      "type": "object",
+      "properties": {
+        "dayKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "ISO calendar date key (YYYY-MM-DD)."
+        },
+        "entries": {
+          "type": "array",
+          "description": "Bounded list (1..12) of compact per-queue snapshot strings formatted as '<queue>|<offH>|<swOffH>|<swOnH>|<possH>|<48-char-slot-mask>'."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["live", "fallback", "local-html"],
+          "description": "Origin of the schedule snapshot."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the Super Admin who persisted this snapshot."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when first archived."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated."
+        }
+      },
+      "required": ["dayKey", "entries", "source", "updatedByUid", "createdAt", "updatedAt"]
+    },
     "UserPreference": {
       "title": "UserPreference",
-      "description": "Private per-user saved home address key.",
+      "description": "Private per-user saved home address key and synchronized favorite addresses.",
       "type": "object",
       "properties": {
         "myHomeKey": {
           "type": "string",
           "maxLength": 160,
           "description": "Canonical street|house key of the user's home."
+        },
+        "favorites": {
+          "type": "array",
+          "description": "Optional bounded list (0..30) of compact pipe-delimited favorite address records synced across the user's devices."
         },
         "updatedAt": {
           "type": "string",
@@ -454,9 +535,17 @@
       "schema": { "$ref": "#/entities/AuditEvent" },
       "description": "Admin-only append-only audit telemetry of authenticated logins, RBAC changes, and edits."
     },
+    "/auditVisitArchives/{dayKey}": {
+      "schema": { "$ref": "#/entities/AuditVisitArchive" },
+      "description": "Super-Admin-only daily zero-PII visit archives ensuring visit history survives ephemeral server redeploys."
+    },
+    "/analyticsArchive/{dayKey}": {
+      "schema": { "$ref": "#/entities/AnalyticsDayArchive" },
+      "description": "Public daily DPEM schedule archive with 48-slot masks for historical pattern detection; writable by Super Admin."
+    },
     "/userPrefs/{userId}": {
       "schema": { "$ref": "#/entities/UserPreference" },
-      "description": "Private per-user home address preference, readable and writable only by the owner."
+      "description": "Private per-user home address and synced favorites, readable and writable only by the owner."
     }
   }
 }

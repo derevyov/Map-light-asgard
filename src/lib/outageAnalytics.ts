@@ -59,10 +59,35 @@ export interface HotspotItem {
   sampleBuildingId?: string;
 }
 
+export interface TimeWindowStat {
+  label: string;
+  avgPct: number;
+}
+
+export interface UpcomingHourRisk {
+  hour: number;
+  label: string;
+  riskPct: number;
+  level: 'high' | 'medium' | 'low';
+}
+
+export interface QueuePatternInsight {
+  queue: SubqueueId;
+  daysWithSlots: number;
+  hourlyRiskPct: number[]; // 24 elements (00..23)
+  avgBlockHours: number;
+  avgLightGapHours: number;
+  avgOutagesPerDay: number;
+  peakWindows: TimeWindowStat[];
+  safestWindows: TimeWindowStat[];
+  upcomingHours: UpcomingHourRisk[];
+}
+
 export interface ComputedOutageAnalytics {
   window: AnalyticsWindow;
   windowDays: number;
   trackedDaysCount: number;
+  daysWithSlotHistory: number;
   unluckyQueues: QueueUnluckyRow[];
   dailySeries: DailyQueuePoint[];
   cityAvgTotalHours: number;
@@ -72,6 +97,7 @@ export interface ComputedOutageAnalytics {
   streetHotspots: HotspotItem[];
   zoneHotspots: HotspotItem[];
   totalIncidentsInWindow: number;
+  queuePatterns: Record<SubqueueId, QueuePatternInsight>;
 }
 
 const LS_ANALYTICS_ARCHIVE = 'dpem_analytics_archive_30d_v1';
@@ -83,6 +109,19 @@ export function toIsoDateLocal(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+export function encodeSlotsToMask(slots: SlotState[]): string {
+  let out = '';
+  for (let i = 0; i < 48; i++) {
+    const s = slots[i];
+    if (s === 'off') out += '1';
+    else if (s === 'switch_off') out += '2';
+    else if (s === 'switch_on') out += '3';
+    else if (s === 'possible') out += '4';
+    else out += '0';
+  }
+  return out;
 }
 
 export function snapshotFromSchedule(
@@ -98,6 +137,7 @@ export function snapshotFromSchedule(
     const queueSwitchOffHours: Partial<Record<SubqueueId, number>> = {};
     const queueSwitchOnHours: Partial<Record<SubqueueId, number>> = {};
     const queuePossibleHours: Partial<Record<SubqueueId, number>> = {};
+    const queueOffSlotMask: Partial<Record<SubqueueId, string>> = {};
 
     for (const q of SUBQUEUES) {
       const slots: SlotState[] | undefined = day.queues[q];
@@ -117,6 +157,9 @@ export function snapshotFromSchedule(
       queueSwitchOffHours[q] = swOff;
       queueSwitchOnHours[q] = swOn;
       queuePossibleHours[q] = poss;
+      if (slots.length >= 48) {
+        queueOffSlotMask[q] = encodeSlotsToMask(slots);
+      }
     }
 
     out.push({
@@ -125,6 +168,7 @@ export function snapshotFromSchedule(
       queueSwitchOffHours,
       queueSwitchOnHours,
       queuePossibleHours,
+      ...(Object.keys(queueOffSlotMask).length > 0 ? { queueOffSlotMask } : {}),
       source,
       updatedAt: day.savedAt || nowIso,
     });
@@ -161,13 +205,23 @@ export function mergeAnalyticsArchives(
     for (const d of src.days || []) {
       if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d.date)) continue;
       const existing = daysMap.get(d.date);
-      // Prefer live data over fallback, or newer updatedAt
-      if (
-        !existing ||
-        (existing.source === 'fallback' && d.source !== 'fallback') ||
-        (existing.source === d.source && d.updatedAt >= existing.updatedAt)
-      ) {
+      // Prefer live data over fallback, or newer updatedAt, while preserving 48-slot masks
+      if (!existing) {
         daysMap.set(d.date, d);
+      } else {
+        const incomingWins =
+          (existing.source === 'fallback' && d.source !== 'fallback') ||
+          (existing.source === d.source && d.updatedAt >= existing.updatedAt);
+        const winner = incomingWins ? d : existing;
+        const loser = incomingWins ? existing : d;
+        const mergedMasks = {
+          ...(loser.queueOffSlotMask || {}),
+          ...(winner.queueOffSlotMask || {}),
+        };
+        daysMap.set(d.date, {
+          ...winner,
+          ...(Object.keys(mergedMasks).length > 0 ? { queueOffSlotMask: mergedMasks } : {}),
+        });
       }
     }
     for (const inc of src.streetIncidents || []) {
@@ -696,10 +750,184 @@ export function computeOutageAnalytics(params: {
 
   const totalIncidentsInWindow = streetHotspots.reduce((sum, s) => sum + s.totalIncidents, 0);
 
+  // 3. Historical Outage Pattern & Forecast Engine (uses all available slot-level days in archive)
+  const slotDays = merged.days.filter(
+    (d) => d.queueOffSlotMask && Object.keys(d.queueOffSlotMask).length > 0
+  );
+  const daysWithSlotHistory = slotDays.length;
+
+  const getCurrentKyivHour = (): number => {
+    try {
+      const hStr = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Kyiv',
+        hour: '2-digit',
+        hour12: false,
+      }).format(new Date());
+      const parsed = Number(hStr);
+      return Number.isFinite(parsed) ? parsed % 24 : new Date().getHours();
+    } catch {
+      return new Date().getHours();
+    }
+  };
+  const currentKyivHour = getCurrentKyivHour();
+
+  const isMaskCharOff = (ch: string): boolean => {
+    if (ch === '1') return true;
+    if (includeSwitches && ch === '2') return true;
+    return false;
+  };
+
+  const extractContiguousWindows = (
+    hourlyPct: number[],
+    predicate: (pct: number) => boolean,
+    sortDesc: boolean
+  ): TimeWindowStat[] => {
+    const groups: Array<{ start: number; end: number; sum: number; count: number }> = [];
+    for (let h = 0; h < 24; h++) {
+      const v = hourlyPct[h];
+      if (predicate(v)) {
+        const prev = groups[groups.length - 1];
+        if (prev && prev.end === h) {
+          prev.end = h + 1;
+          prev.sum += v;
+          prev.count += 1;
+        } else {
+          groups.push({ start: h, end: h + 1, sum: v, count: 1 });
+        }
+      }
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return groups
+      .map((g) => ({
+        label: `${pad(g.start)}:00–${pad(g.end)}:00`,
+        avgPct: Math.round(g.sum / g.count),
+        span: g.end - g.start,
+      }))
+      .sort((a, b) =>
+        sortDesc
+          ? b.avgPct - a.avgPct || b.span - a.span
+          : a.avgPct - b.avgPct || b.span - a.span
+      )
+      .slice(0, 3)
+      .map(({ label, avgPct }) => ({ label, avgPct }));
+  };
+
+  const queuePatterns = {} as Record<SubqueueId, QueuePatternInsight>;
+  for (const q of SUBQUEUES) {
+    const hourOffSlotHits = new Array<number>(24).fill(0);
+    const hourTotalSlots = new Array<number>(24).fill(0);
+    let qDaysCount = 0;
+    const offBlockLens: number[] = [];
+    const onGapLens: number[] = [];
+    let totalOffBlocks = 0;
+
+    for (const day of slotDays) {
+      const mask = day.queueOffSlotMask?.[q];
+      if (!mask || mask.length < 48) continue;
+      qDaysCount += 1;
+
+      let curIsOff: boolean | null = null;
+      let curLen = 0;
+      const runs: Array<{ isOff: boolean; lenSlots: number }> = [];
+
+      for (let s = 0; s < 48; s++) {
+        const off = isMaskCharOff(mask[s]);
+        const h = Math.floor(s / 2);
+        hourTotalSlots[h] += 1;
+        if (off) hourOffSlotHits[h] += 1;
+
+        if (curIsOff === off) {
+          curLen += 1;
+        } else {
+          if (curIsOff !== null && curLen > 0) {
+            runs.push({ isOff: curIsOff, lenSlots: curLen });
+          }
+          curIsOff = off;
+          curLen = 1;
+        }
+      }
+      if (curIsOff !== null && curLen > 0) {
+        runs.push({ isOff: curIsOff, lenSlots: curLen });
+      }
+
+      for (let idx = 0; idx < runs.length; idx++) {
+        const r = runs[idx];
+        if (r.isOff) {
+          totalOffBlocks += 1;
+          offBlockLens.push(r.lenSlots * 0.5);
+        } else if (idx > 0 && idx < runs.length - 1) {
+          // Light gaps strictly between two outages give the true cycle recovery interval
+          onGapLens.push(r.lenSlots * 0.5);
+        }
+      }
+      // If a day only had 1 outage block, still include the longest light run if no interior gaps exist
+      if (onGapLens.length === 0) {
+        const longestOn = runs.filter((r) => !r.isOff).sort((a, b) => b.lenSlots - a.lenSlots)[0];
+        if (longestOn && runs.some((r) => r.isOff)) {
+          onGapLens.push(longestOn.lenSlots * 0.5);
+        }
+      }
+    }
+
+    const hourlyRiskPct = hourOffSlotHits.map((hits, h) =>
+      hourTotalSlots[h] > 0 ? Math.round((hits / hourTotalSlots[h]) * 100) : 0
+    );
+
+    const avgBlockHours =
+      offBlockLens.length > 0
+        ? Number((offBlockLens.reduce((a, b) => a + b, 0) / offBlockLens.length).toFixed(1))
+        : 0;
+    const avgLightGapHours =
+      onGapLens.length > 0
+        ? Number((onGapLens.reduce((a, b) => a + b, 0) / onGapLens.length).toFixed(1))
+        : 0;
+    const avgOutagesPerDay =
+      qDaysCount > 0 ? Number((totalOffBlocks / qDaysCount).toFixed(1)) : 0;
+
+    const maxPct = Math.max(0, ...hourlyRiskPct);
+    const peakThreshold = maxPct >= 50 ? Math.max(40, Math.round(maxPct * 0.7)) : Math.max(15, Math.round(maxPct * 0.7));
+    const peakWindows =
+      maxPct > 0
+        ? extractContiguousWindows(hourlyRiskPct, (p) => p >= peakThreshold, true)
+        : [];
+    const safestWindows =
+      qDaysCount > 0
+        ? extractContiguousWindows(hourlyRiskPct, (p) => p <= Math.min(20, Math.round(maxPct * 0.25)), false)
+        : [];
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const upcomingHours: UpcomingHourRisk[] = [];
+    for (let offset = 0; offset < 12; offset++) {
+      const h = (currentKyivHour + offset) % 24;
+      const riskPct = hourlyRiskPct[h] ?? 0;
+      const level: UpcomingHourRisk['level'] =
+        riskPct >= 60 ? 'high' : riskPct >= 25 ? 'medium' : 'low';
+      upcomingHours.push({
+        hour: h,
+        label: `${pad(h)}:00`,
+        riskPct,
+        level,
+      });
+    }
+
+    queuePatterns[q] = {
+      queue: q,
+      daysWithSlots: qDaysCount,
+      hourlyRiskPct,
+      avgBlockHours,
+      avgLightGapHours,
+      avgOutagesPerDay,
+      peakWindows,
+      safestWindows,
+      upcomingHours,
+    };
+  }
+
   return {
     window,
     windowDays,
     trackedDaysCount,
+    daysWithSlotHistory,
     unluckyQueues,
     dailySeries,
     cityAvgTotalHours,
@@ -709,5 +937,6 @@ export function computeOutageAnalytics(params: {
     streetHotspots,
     zoneHotspots,
     totalIncidentsInWindow,
+    queuePatterns,
   };
 }

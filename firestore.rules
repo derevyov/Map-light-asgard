@@ -115,6 +115,10 @@ service cloud.firestore {
       return lng is number && lng >= 31.00 && lng <= 31.35;
     }
 
+    function isValidDayKey(key) {
+      return key is string && key.size() == 10 && key.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
     // Validation Blueprint: FeederTransfer
     function isValidTransfer(data) {
       return data.keys().hasAll([
@@ -261,11 +265,49 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
-    // Validation Blueprint: UserPreference (Private PII: home address)
+    // Validation Blueprint: AuditVisitArchive (Zero-PII daily visit snapshots)
+    function isValidAuditVisitArchive(data) {
+      return data.keys().hasAll([
+          'dayKey', 'entries', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'dayKey', 'entries', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidDayKey(data.dayKey) &&
+        data.entries is list && data.entries.size() >= 1 && data.entries.size() <= 500 &&
+        data.entries[0] is string && data.entries[0].size() >= 10 && data.entries[0].size() <= 160 &&
+        isValidId(data.updatedByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: AnalyticsDayArchive (Public daily DPEM 48-slot schedule archives)
+    function isValidAnalyticsDayArchive(data) {
+      return data.keys().hasAll([
+          'dayKey', 'entries', 'source', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'dayKey', 'entries', 'source', 'updatedByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidDayKey(data.dayKey) &&
+        data.entries is list && data.entries.size() >= 1 && data.entries.size() <= 12 &&
+        data.entries[0] is string && data.entries[0].size() >= 55 && data.entries[0].size() <= 110 &&
+        data.source is string && data.source in ['live', 'fallback', 'local-html'] &&
+        isValidId(data.updatedByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: UserPreference (Private PII: home address & favorites)
     function isValidUserPref(data) {
       return data.keys().hasAll(['myHomeKey', 'updatedAt']) &&
-        data.keys().hasOnly(['myHomeKey', 'updatedAt']) &&
+        data.keys().hasOnly(['myHomeKey', 'favorites', 'updatedAt']) &&
         data.myHomeKey is string && data.myHomeKey.size() <= 160 &&
+        (!('favorites' in data) || (
+          data.favorites is list &&
+          data.favorites.size() <= 30 &&
+          (data.favorites.size() == 0 || (data.favorites[0] is string && data.favorites[0].size() <= 320))
+        )) &&
         data.updatedAt is timestamp;
     }
 
@@ -488,6 +530,58 @@ service cloud.firestore {
       allow delete: if isValidId(eventId) && isSuperAdmin();
     }
 
+    // Super-Admin-only daily zero-PII visit archives (survives server container redeploys)
+    match /auditVisitArchives/{dayKey} {
+      allow get: if isSuperAdmin() && isValidId(dayKey) && isValidDayKey(dayKey) && (resource == null || existing().dayKey == dayKey);
+      allow list: if isSuperAdmin() && resource.data.dayKey is string && resource.data.dayKey >= '2020-01-01' && resource.data.dayKey <= '2099-12-31';
+
+      allow create: if isSuperAdmin() &&
+        isValidId(dayKey) &&
+        isValidDayKey(dayKey) &&
+        isValidAuditVisitArchive(incoming()) &&
+        incoming().dayKey == dayKey &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSuperAdmin() &&
+        isValidId(dayKey) &&
+        isValidAuditVisitArchive(incoming()) &&
+        incoming().dayKey == existing().dayKey &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['entries', 'updatedByUid', 'updatedAt']);
+
+      allow delete: if isSuperAdmin() && isValidId(dayKey);
+    }
+
+    // Public daily DPEM schedule archive with 48-slot outage masks (survives server redeploys)
+    match /analyticsArchive/{dayKey} {
+      allow get: if isValidId(dayKey) && isValidDayKey(dayKey) && (resource == null || existing().dayKey == dayKey);
+      allow list: if resource.data.dayKey is string && resource.data.dayKey >= '2020-01-01' && resource.data.dayKey <= '2099-12-31';
+
+      allow create: if isSuperAdmin() &&
+        isValidId(dayKey) &&
+        isValidDayKey(dayKey) &&
+        isValidAnalyticsDayArchive(incoming()) &&
+        incoming().dayKey == dayKey &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSuperAdmin() &&
+        isValidId(dayKey) &&
+        isValidAnalyticsDayArchive(incoming()) &&
+        incoming().dayKey == existing().dayKey &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['entries', 'source', 'updatedByUid', 'updatedAt']);
+
+      allow delete: if isSuperAdmin() && isValidId(dayKey);
+    }
+
     // Private per-user preferences (PII isolated to owner only; no list allowed)
     match /userPrefs/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
@@ -502,7 +596,7 @@ service cloud.firestore {
         isOwner(userId) &&
         isValidUserPref(incoming()) &&
         incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['myHomeKey', 'updatedAt']);
+        incoming().diff(existing()).affectedKeys().hasOnly(['myHomeKey', 'favorites', 'updatedAt']);
 
       allow delete: if isValidId(userId) && isOwner(userId);
     }
