@@ -327,33 +327,36 @@ service cloud.firestore {
         (existing().authorUid == request.auth.uid || isActiveAdmin());
     }
 
-    // Public user-pinned map points (writable ONLY by active editors/admins)
+    // Public user-pinned map points (readable by all; creatable by any verified non-banned user; editable/deletable by author or admin)
     match /manualPoints/{pointId} {
       allow get: if isValidId(pointId) && existing().status == 'active';
       allow list: if resource.data.status == 'active';
 
-      allow create: if isActiveEditor() &&
+      allow create: if isVerified() &&
         isValidId(pointId) &&
         isValidManualPoint(incoming()) &&
         incoming().authorUid == request.auth.uid &&
         incoming().status == 'active' &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time;
+        incoming().updatedAt == request.time &&
+        isNotBanned();
 
-      allow update: if isActiveEditor() &&
+      allow update: if isVerified() &&
         isValidId(pointId) &&
         isValidManualPoint(incoming()) &&
         incoming().authorUid == existing().authorUid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
+        isNotBanned() &&
         (existing().status != 'archived' || isActiveAdmin()) &&
         (
           (isActiveAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'queue', 'feeder', 'note', 'lat', 'lng', 'status', 'updatedAt'])) ||
           (existing().authorUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'queue', 'feeder', 'note', 'status', 'updatedAt']))
         );
 
-      allow delete: if isActiveEditor() &&
+      allow delete: if isVerified() &&
         isValidId(pointId) &&
+        isNotBanned() &&
         (existing().authorUid == request.auth.uid || isActiveAdmin());
     }
 
@@ -362,11 +365,15 @@ service cloud.firestore {
       allow get: if isValidId(entryId) && isValidHistoryAction(existing().action);
       allow list: if resource.data.action in ['point_added', 'point_removed', 'collision_changed', 'dual_mode_changed'];
 
-      allow create: if isActiveEditor() &&
+      allow create: if isVerified() &&
         isValidId(entryId) &&
         isValidHistoryEntry(incoming()) &&
         incoming().authorUid == request.auth.uid &&
-        incoming().createdAt == request.time;
+        incoming().createdAt == request.time &&
+        (
+          isActiveEditor() ||
+          (isNotBanned() && incoming().action in ['point_added', 'point_removed'])
+        );
 
       allow update: if false;
 

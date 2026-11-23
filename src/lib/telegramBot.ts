@@ -81,16 +81,26 @@ const MAX_MESSAGE_AGE_SEC = 3600; // process messages queued up to 1h while cont
 const BOT_SHORT_DESCRIPTION_UK =
   'Карта відключень ГПВ м. Південноукраїнськ (ДПЕМ) · черги 1.1–6.2, обрані адреси, живі таймери.';
 
-const BOT_DESCRIPTION_UK = [
-  '⚡ Карта відключень електроенергії м. Південноукраїнськ (ДПЕМ).',
-  '',
-  '• Інтерактивна карта по будинках і чергах 1.1–6.2',
-  '• Екран «Мій дім» та «Обрані» з таймерами й 24-год. матрицею',
-  '• Спрощений режим «Світло / Без світла»',
-  '• Швидка перевірка черги прямо в чаті (/now або 3.1)',
-  '',
-  'Натисніть «Старт», щоб відкрити інтерактивну карту 👇',
-].join('\n');
+function isAiStudioPrivateUrl(url: string | null): boolean {
+  if (!url) return false;
+  return /^https:\/\/ais-(?:dev|pre)-[^/]+\.run\.app(?:\/|$)/i.test(url);
+}
+
+function buildBotDescriptionUk(publicSiteUrl: string | null): string {
+  const lines = [
+    '⚡ Карта відключень електроенергії м. Південноукраїнськ (ДПЕМ).',
+    '',
+    '• Інтерактивна карта по будинках і чергах 1.1–6.2',
+    '• Екран «Мій дім» та «Обрані» з таймерами й 24-год. матрицею',
+    '• Статистика невезучих черг та гарячих точок (7 / 30 днів)',
+    '• Швидка перевірка черги прямо в чаті (/now або 3.1)',
+  ];
+  if (publicSiteUrl && !isAiStudioPrivateUrl(publicSiteUrl)) {
+    lines.push('', `🌐 Повний сайт: ${publicSiteUrl}`);
+  }
+  lines.push('', 'Натисніть «Старт», щоб відкрити інтерактивну карту 👇');
+  return lines.join('\n');
+}
 
 function escapeTelegramHtml(input: string): string {
   return input
@@ -198,17 +208,20 @@ function buildMergedLightDarkLines(slots: SlotState[]): string[] {
 
 function buildMiniAppKeyboard(
   webAppUrl: string | null,
-  extra?: { queue?: SubqueueId; includeStatusButton?: boolean }
+  extra?: { queue?: SubqueueId; includeStatusButton?: boolean; includeWebsiteButton?: boolean }
 ): Record<string, unknown> | undefined {
   const rows: Array<Array<Record<string, unknown>>> = [];
 
   if (webAppUrl) {
+    const queueUrl = extra?.queue
+      ? `${webAppUrl}/?tgWebAppStartParam=q_${extra.queue.replace('-', '_')}`
+      : webAppUrl;
+
     if (extra?.queue) {
-      const targetUrl = `${webAppUrl}/?tgWebAppStartParam=q_${extra.queue.replace('-', '_')}`;
       rows.push([
         {
           text: `🗺 Відкрити чергу ${queueDisplay(extra.queue)} на карті`,
-          web_app: { url: targetUrl },
+          web_app: { url: queueUrl },
         },
       ]);
     } else {
@@ -216,6 +229,15 @@ function buildMiniAppKeyboard(
         {
           text: '🗺 Відкрити карту ГПВ (Mini App)',
           web_app: { url: webAppUrl },
+        },
+      ]);
+    }
+
+    if (extra?.includeWebsiteButton !== false) {
+      rows.push([
+        {
+          text: '🌐 Відкрити повний сайт у браузері',
+          url: queueUrl,
         },
       ]);
     }
@@ -252,11 +274,20 @@ function verifySecretToken(received: string | undefined, expected: string): bool
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const DEFAULT_PUBLIC_SITE_URL = 'https://map-light-asgard.onrender.com';
+
 export function resolveWebAppUrl(): string | null {
-  return (
-    sanitizeHttpsUrl(process.env.TELEGRAM_WEBAPP_URL) ||
-    sanitizeHttpsUrl(process.env.APP_URL)
-  );
+  const candidates = [
+    sanitizeHttpsUrl(process.env.TELEGRAM_WEBAPP_URL),
+    sanitizeHttpsUrl(process.env.RENDER_EXTERNAL_URL),
+    sanitizeHttpsUrl(process.env.APP_URL),
+  ];
+  for (const url of candidates) {
+    if (url && !isAiStudioPrivateUrl(url)) {
+      return url;
+    }
+  }
+  return DEFAULT_PUBLIC_SITE_URL;
 }
 
 async function callTelegramApi<T = unknown>(
@@ -289,11 +320,11 @@ async function callTelegramApi<T = unknown>(
   }
 }
 
-export function formatStartMessage(firstName?: string): string {
+export function formatStartMessage(firstName?: string, webAppUrl?: string | null): string {
   const safeName = firstName ? escapeTelegramHtml(firstName.slice(0, 48)) : '';
   const greeting = safeName ? `Вітаю, <b>${safeName}</b>! ⚡` : 'Вітаю! ⚡';
 
-  return [
+  const lines = [
     greeting,
     '',
     '<b>Карта відключень ГПВ — м. Південноукраїнськ (ДПЕМ)</b>',
@@ -301,11 +332,20 @@ export function formatStartMessage(firstName?: string): string {
     'Що вміє цей бот та Mini App:',
     '• 🗺 <b>Інтерактивна карта міста</b> — поточний статус світла по кожному будинку та черзі (1.1–6.2)',
     '• ⭐ <b>«Мій дім» та «Обрані»</b> — окрема сторінка з таймером до змін і 24-годинною матрицею адрес',
-    '• 🌓 <b>Режим «Світло / Без світла»</b> — спрощений графік без зайвої нарізки перемикань',
+    '• 📊 <b>Статистика</b> — невезучі черги та гарячі точки за тиждень і місяць',
     '• ⚡ <b>Швидка перевірка прямо в чаті</b> — надішліть /now або номер черги (наприклад <code>3.1</code>)',
-    '',
-    'Натисніть кнопку нижче, щоб відкрити інтерактивну карту 👇',
-  ].join('\n');
+  ];
+
+  if (webAppUrl && !isAiStudioPrivateUrl(webAppUrl)) {
+    const label = webAppUrl.replace(/^https:\/\//i, '');
+    lines.push(
+      '',
+      `🌐 <b>Повний сайт:</b> <a href="${escapeTelegramHtml(webAppUrl)}">${escapeTelegramHtml(label)}</a>`
+    );
+  }
+
+  lines.push('', 'Натисніть кнопку нижче, щоб відкрити карту 👇');
+  return lines.join('\n');
 }
 
 export function initTelegramBot({ app, getDpemPayload }: TelegramBotOptions): TelegramBotStatus {
@@ -540,8 +580,8 @@ export function initTelegramBot({ app, getDpemPayload }: TelegramBotOptions): Te
     if (/^\/start(?:@\w+)?(?:\s|$)/i.test(text) || /^\/help(?:@\w+)?(?:\s|$)/i.test(text)) {
       await sendStartPhotoReply(
         chatId,
-        formatStartMessage(msg.from?.first_name),
-        buildMiniAppKeyboard(webAppUrl, { includeStatusButton: true })
+        formatStartMessage(msg.from?.first_name, webAppUrl),
+        buildMiniAppKeyboard(webAppUrl, { includeStatusButton: true, includeWebsiteButton: true })
       );
       return;
     }
@@ -620,7 +660,7 @@ export function initTelegramBot({ app, getDpemPayload }: TelegramBotOptions): Te
         ],
       }),
       callTelegramApi(botToken, 'setMyDescription', {
-        description: BOT_DESCRIPTION_UK,
+        description: buildBotDescriptionUk(webAppUrl),
       }),
       callTelegramApi(botToken, 'setMyShortDescription', {
         short_description: BOT_SHORT_DESCRIPTION_UK,
@@ -632,7 +672,8 @@ export function initTelegramBot({ app, getDpemPayload }: TelegramBotOptions): Te
     }
 
     let menuOk = true;
-    if (webAppUrl) {
+    // Never overwrite Telegram's public menu button with a Google-IAP-protected AI Studio preview URL
+    if (webAppUrl && !isAiStudioPrivateUrl(webAppUrl)) {
       const menuRes = await callTelegramApi(botToken, 'setChatMenuButton', {
         menu_button: {
           type: 'web_app',

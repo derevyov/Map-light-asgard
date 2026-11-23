@@ -436,11 +436,11 @@
     },
     "/manualPoints/{pointId}": {
       "schema": { "$ref": "#/entities/ManualPoint" },
-      "description": "Shared user-pinned map coordinates without known street addresses; writable by active editors/admins."
+      "description": "Shared user-pinned map coordinates without known street addresses; publicly readable by all viewers and creatable by any verified non-banned user (editable/deletable by author or admin)."
     },
     "/assignmentHistory/{entryId}": {
       "schema": { "$ref": "#/entities/AssignmentHistory" },
-      "description": "Shared append-only assignment history journal visible to all viewers."
+      "description": "Shared append-only assignment history journal visible to all viewers; point additions/removals creatable by any verified non-banned user, collision/dual-mode changes by editors/admins."
     },
     "/userRoles/{targetUid}": {
       "schema": { "$ref": "#/entities/UserRole" },

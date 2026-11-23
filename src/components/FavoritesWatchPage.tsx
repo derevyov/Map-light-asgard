@@ -24,7 +24,9 @@ import {
   FavoriteAddress,
   formatSlotTime,
   formatSubqueue,
+  ManualPoint,
   SlotState,
+  SUBQUEUES,
   SubqueueId,
 } from '../lib/types';
 
@@ -32,6 +34,7 @@ interface FavoritesWatchPageProps {
   favorites: FavoriteAddress[];
   myHomeKey: string | null;
   buildings: BuildingRecord[];
+  manualPoints: ManualPoint[];
   resolverCtx: ResolverContext;
   queuesMap: Partial<Record<SubqueueId, SlotState[]>>;
   availableDates: string[];
@@ -107,10 +110,27 @@ function computeCountdownMerged(
   };
 }
 
+function extractQueueFromNote(note?: string): SubqueueId | null {
+  if (!note) return null;
+  const romanMatch = note.match(/\b([1-6])\s*[-.]\s*(II|I)\b/i);
+  if (romanMatch) {
+    const sub = romanMatch[2].toUpperCase() === 'II' ? '2' : '1';
+    const q = `${romanMatch[1]}-${sub}` as SubqueueId;
+    if (SUBQUEUES.includes(q)) return q;
+  }
+  const numMatch = note.match(/\b([1-6])\s*[-.]\s*([12])\b/);
+  if (numMatch) {
+    const q = `${numMatch[1]}-${numMatch[2]}` as SubqueueId;
+    if (SUBQUEUES.includes(q)) return q;
+  }
+  return null;
+}
+
 export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
   favorites,
   myHomeKey,
   buildings,
+  manualPoints,
   resolverCtx,
   queuesMap,
   availableDates,
@@ -141,6 +161,7 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
 
     const buildFromBuilding = (
       b: BuildingRecord | undefined,
+      mp: ManualPoint | undefined,
       key: string,
       title: string,
       note: string,
@@ -150,7 +171,10 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
       let queue: SubqueueId | null = null;
       let feeder: string | undefined;
 
-      if (b?.source === 'manual' && b.manualQueue) {
+      if (mp) {
+        queue = mp.queue;
+        feeder = mp.feeder || undefined;
+      } else if (b?.source === 'manual' && b.manualQueue) {
         queue = b.manualQueue;
         feeder = b.manualFeeder;
       } else if (b) {
@@ -158,9 +182,14 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
         queue = info?.primary || null;
         feeder = info?.feeder;
       } else if (favorite) {
-        const info = resolveBuilding(favorite.street, favorite.house, resolverCtx);
-        queue = info?.primary || null;
-        feeder = info?.feeder;
+        if (favorite.queue) {
+          queue = favorite.queue;
+          feeder = favorite.feeder;
+        } else {
+          const info = resolveBuilding(favorite.street, favorite.house, resolverCtx);
+          queue = info?.primary || extractQueueFromNote(favorite.note);
+          feeder = info?.feeder;
+        }
       }
 
       const schedule = queue ? queuesMap[queue] || [] : [];
@@ -186,15 +215,23 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
 
     if (myHomeKey) {
       const homeB = buildings.find((b) => b.key === myHomeKey);
+      const homeMp = myHomeKey.startsWith('manual|')
+        ? manualPoints.find((p) => `manual|${p.id}` === myHomeKey)
+        : undefined;
       const matchingFav = favorites.find((f) => f.key === myHomeKey);
-      if (homeB || matchingFav) {
+      if (homeB || homeMp || matchingFav) {
         seenKeys.add(myHomeKey);
         list.push(
           buildFromBuilding(
             homeB,
+            homeMp,
             myHomeKey,
-            homeB ? homeB.label || `${homeB.street}, ${homeB.house}` : matchingFav!.label || `${matchingFav!.street}, ${matchingFav!.house}`,
-            matchingFav?.note || 'Мій дім',
+            homeMp
+              ? homeMp.label
+              : homeB
+              ? homeB.label || `${homeB.street}, ${homeB.house}`
+              : matchingFav!.label || `${matchingFav!.street}${matchingFav!.house ? `, ${matchingFav!.house}` : ''}`,
+            matchingFav?.note || homeMp?.note || 'Мій дім',
             true,
             matchingFav
           )
@@ -205,13 +242,17 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
     for (const fav of favorites) {
       if (seenKeys.has(fav.key)) continue;
       seenKeys.add(fav.key);
-      const b = buildings.find((x) => x.key === fav.key || x.id === fav.buildingId);
+      const mp = fav.key.startsWith('manual|')
+        ? manualPoints.find((p) => `manual|${p.id}` === fav.key || p.id === fav.buildingId)
+        : undefined;
+      const b = mp ? undefined : buildings.find((x) => x.key === fav.key || x.id === fav.buildingId);
       list.push(
         buildFromBuilding(
           b,
+          mp,
           fav.key,
-          fav.label || `${fav.street}${fav.house ? `, ${fav.house}` : ''}`,
-          fav.note || '',
+          mp?.label || fav.label || `${fav.street}${fav.house ? `, ${fav.house}` : ''}`,
+          fav.note || mp?.note || '',
           false,
           fav
         )
@@ -219,7 +260,7 @@ export const FavoritesWatchPage: React.FC<FavoritesWatchPageProps> = ({
     }
 
     return list;
-  }, [myHomeKey, favorites, buildings, resolverCtx, queuesMap, currentSlot, mergedLightDark, now]);
+  }, [myHomeKey, favorites, buildings, manualPoints, resolverCtx, queuesMap, currentSlot, mergedLightDark, now]);
 
   const anySwitchingToday = useMemo(
     () => watchedItems.some((item) => item.schedule.some((s) => s === 'switch_off' || s === 'switch_on')),

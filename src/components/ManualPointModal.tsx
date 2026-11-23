@@ -1,9 +1,17 @@
-import React, { useState } from 'react';
-import { MapPin, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { MapPin, Sparkles, X } from 'lucide-react';
 import { formatSubqueue, SUBQUEUES, SubqueueId } from '../lib/types';
+
+export interface NearestQueueSuggestion {
+  queue: SubqueueId;
+  feeder: string;
+  addressLabel: string;
+  distanceMeters: number;
+}
 
 interface ManualPointModalProps {
   coords: { lat: number; lng: number };
+  suggestedMatch?: NearestQueueSuggestion | null;
   onCancel: () => void;
   onSave: (input: {
     label: string;
@@ -16,14 +24,22 @@ interface ManualPointModalProps {
 
 export const ManualPointModal: React.FC<ManualPointModalProps> = ({
   coords,
+  suggestedMatch,
   onCancel,
   onSave,
 }) => {
   const [label, setLabel] = useState<string>('');
-  const [queue, setQueue] = useState<SubqueueId>('1-1');
-  const [feeder, setFeeder] = useState<string>('');
+  const [queue, setQueue] = useState<SubqueueId>(() => suggestedMatch?.queue || '1-1');
+  const [feeder, setFeeder] = useState<string>(() => suggestedMatch?.feeder || '');
   const [note, setNote] = useState<string>('');
   const [addToFavorites, setAddToFavorites] = useState<boolean>(true);
+
+  useEffect(() => {
+    if (suggestedMatch) {
+      setQueue(suggestedMatch.queue);
+      setFeeder(suggestedMatch.feeder);
+    }
+  }, [coords.lat, coords.lng, suggestedMatch]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,6 +79,20 @@ export const ManualPointModal: React.FC<ManualPointModalProps> = ({
         <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
           Координати: {coords.lat.toFixed(6)}, {coords.lng.toFixed(6)}
         </div>
+
+        {suggestedMatch ? (
+          <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-sky-50 dark:bg-sky-950/50 border border-sky-200 dark:border-sky-800/70 text-[11px] text-sky-800 dark:text-sky-200 leading-snug">
+            <Sparkles className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5" />
+            <span>
+              Автовизначено за найближчим будинком (<strong>{suggestedMatch.addressLabel}</strong>, ~{suggestedMatch.distanceMeters} м) →{' '}
+              <strong className="font-mono">черга {formatSubqueue(suggestedMatch.queue)}</strong>. За потреби змініть вручну.
+            </span>
+          </div>
+        ) : (
+          <div className="px-2.5 py-1.5 rounded-md bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+            Поблизу немає будинків із таблиці ДПЕМ — оберіть підчергу вручну.
+          </div>
+        )}
 
         <div>
           <label className="block text-[11px] text-slate-600 dark:text-slate-400 mb-1">

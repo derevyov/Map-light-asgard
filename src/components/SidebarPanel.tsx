@@ -259,8 +259,37 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
     return () => clearInterval(t);
   }, [myHomeKey]);
 
-  const homeBuilding = myHomeKey ? buildings.find((b) => b.key === myHomeKey) || null : null;
-  const homeInfo = homeBuilding
+  const homeManual =
+    myHomeKey && myHomeKey.startsWith('manual|')
+      ? manualPoints.find((p) => `manual|${p.id}` === myHomeKey) || null
+      : null;
+  const homeBuilding = homeManual
+    ? {
+        id: homeManual.id,
+        key: `manual|${homeManual.id}`,
+        street: homeManual.label,
+        house: '',
+        label: homeManual.label,
+        source: 'manual' as const,
+        manualQueue: homeManual.queue,
+        manualFeeder: homeManual.feeder,
+        manualNote: homeManual.note,
+        lat: homeManual.lat,
+        lng: homeManual.lng,
+      }
+    : myHomeKey
+    ? buildings.find((b) => b.key === myHomeKey) || null
+    : null;
+  const homeInfo = homeManual
+    ? {
+        primary: homeManual.queue,
+        secondary: null,
+        allQueues: [homeManual.queue],
+        dualType: 'none' as const,
+        feeder: homeManual.feeder || 'Вказана точка',
+        isTransferred: false,
+      }
+    : homeBuilding
     ? resolveBuilding(homeBuilding.street, homeBuilding.house, resolverCtx)
     : null;
   const homeSchedule = homeInfo ? queuesMap[homeInfo.primary] || [] : [];
@@ -474,12 +503,12 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
                   <div className="space-y-2 text-xs">
                     {favorites.map((fav) => {
                       const mp = fav.key.startsWith('manual|')
-                        ? manualPoints.find((p) => `manual|${p.id}` === fav.key)
+                        ? manualPoints.find((p) => `manual|${p.id}` === fav.key || p.id === fav.buildingId)
                         : null;
                       const info = mp
                         ? null
                         : resolveBuilding(fav.street, fav.house, resolverCtx);
-                      const activeQueue = mp ? mp.queue : info?.primary || null;
+                      const activeQueue = mp ? mp.queue : fav.queue || info?.primary || null;
                       const curState: SlotState = activeQueue
                         ? queuesMap[activeQueue]?.[currentSlot] || 'on'
                         : 'on';
@@ -1297,10 +1326,20 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
                     <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
                       <Send className="w-3 h-3 text-sky-500 shrink-0" />
                       <span>
-                        Telegram Mini App працює автоматично при відкритті з бота. Для входу через Telegram у браузері задайте <code className="font-mono">TELEGRAM_BOT_TOKEN</code> та <code className="font-mono">TELEGRAM_BOT_USERNAME</code>.
+                        Telegram Mini App працює автоматично при відкритті з бота.
                       </span>
                     </div>
                   )}
+
+                  <a
+                    href={`https://t.me/${telegramBotUsername || 'Map_light_asgard_bot'}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded bg-sky-50 dark:bg-sky-950/50 hover:bg-sky-100 dark:hover:bg-sky-900/60 border border-sky-200 dark:border-sky-800 text-sky-700 dark:text-sky-300 font-medium transition-colors"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Telegram-бот @{telegramBotUsername || 'Map_light_asgard_bot'}</span>
+                  </a>
                 </div>
               </section>
 

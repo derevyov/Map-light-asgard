@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3,
   Clock,
+  ExternalLink,
   Eye,
   Layers,
   Menu,
@@ -12,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Send,
   Shield,
   SlidersHorizontal,
   Star,
@@ -26,7 +28,7 @@ import { AuditDashboardModal } from './components/AuditDashboardModal';
 import { AppMode, BuildingInspector } from './components/BuildingInspector';
 import { CalendarDatePicker } from './components/CalendarDatePicker';
 import { FavoritesWatchPage } from './components/FavoritesWatchPage';
-import { ManualPointModal } from './components/ManualPointModal';
+import { ManualPointModal, NearestQueueSuggestion } from './components/ManualPointModal';
 import { MapCanvas, MapCanvasHandle } from './components/MapCanvas';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -82,11 +84,13 @@ import {
   normalizeStreet,
   parseDpemGrafHtml,
 } from './lib/parser';
+import { resolveBuilding } from './lib/resolver';
 import { normalizeDisplayState } from './lib/scheduleIntervals';
 import {
   fetchTelegramAuthConfig,
   getTelegramWebApp,
   initTelegramMiniApp,
+  openCurrentUrlInExternalBrowser,
   syncTelegramThemeColors,
   TelegramLoginWidgetPayload,
   triggerTelegramHaptic,
@@ -259,7 +263,7 @@ export default function App() {
 
   // Telegram Mini App & Telegram Login state (session token held strictly in React memory)
   const [telegramUser, setTelegramUser] = useState<TelegramUserProfile | null>(null);
-  const [, setTelegramSessionToken] = useState<string | null>(null);
+  const [telegramSessionToken, setTelegramSessionToken] = useState<string | null>(null);
   const [telegramBotUsername, setTelegramBotUsername] = useState<string | null>(null);
 
   // Firebase Auth, RBAC & Cloud Firestore state
@@ -272,6 +276,7 @@ export default function App() {
   const [cloudTransfers, setCloudTransfers] = useState<FeederTransfer[]>([]);
   const [cloudOverrides, setCloudOverrides] = useState<Record<string, BuildingOverride>>({});
   const [cloudManualPoints, setCloudManualPoints] = useState<ManualPoint[]>([]);
+  const [serverManualPoints, setServerManualPoints] = useState<ManualPoint[]>([]);
   const [cloudAssignmentHistory, setCloudAssignmentHistory] = useState<AssignmentHistoryEntry[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
   const [serverAuditStats, setServerAuditStats] = useState<ServerAuditStats | null>(null);
@@ -753,12 +758,36 @@ export default function App() {
     [localOverrides, cloudOverrides]
   );
 
+  // Load public community manual points from server (shared across Telegram Mini App & browser visitors)
+  const refreshServerManualPoints = useCallback(async () => {
+    try {
+      const res = await fetch('/api/manual-points', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = (await res.json()) as { points?: ManualPoint[] };
+      if (Array.isArray(data?.points)) {
+        setServerManualPoints(data.points);
+      }
+    } catch {
+      // Offline — keep existing points
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshServerManualPoints();
+  }, [refreshServerManualPoints]);
+
   const mergedManualPoints = useMemo(() => {
-    const seen = new Set(cloudManualPoints.map((p) => p.id));
-    return [...cloudManualPoints, ...manualPoints.filter((p) => !seen.has(p.id))].sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt)
-    );
-  }, [cloudManualPoints, manualPoints]);
+    const seenIds = new Set<string>();
+    const combined: ManualPoint[] = [];
+    for (const src of [cloudManualPoints, serverManualPoints, manualPoints]) {
+      for (const p of src) {
+        if (seenIds.has(p.id)) continue;
+        seenIds.add(p.id);
+        combined.push(p);
+      }
+    }
+    return combined.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [cloudManualPoints, serverManualPoints, manualPoints]);
 
   const mergedAssignmentHistory = useMemo(() => {
     const seen = new Set(cloudAssignmentHistory.map((h) => h.id));
@@ -1050,8 +1079,40 @@ export default function App() {
       .slice(0, 10);
   }, [buildings, mergedManualPoints, searchQuery]);
 
+  // Auto-detect nearest DPEM-mapped building when picking a manual point (within 150m)
+  const nearestPickSuggestion = useMemo<NearestQueueSuggestion | null>(() => {
+    if (!pendingPickCoords || buildings.length === 0) return null;
+    const mLat = 111_132;
+    const mLng = 111_320 * Math.cos((pendingPickCoords.lat * Math.PI) / 180);
+    let best: NearestQueueSuggestion | null = null;
+    let bestDist = 150;
+
+    for (const b of buildings) {
+      const dist = Math.hypot(
+        (b.lat - pendingPickCoords.lat) * mLat,
+        (b.lng - pendingPickCoords.lng) * mLng
+      );
+      if (dist >= bestDist) continue;
+      const info = resolveBuilding(b.street, b.house, resolverCtx);
+      if (!info?.primary) continue;
+      bestDist = dist;
+      best = {
+        queue: info.primary,
+        feeder: info.feeder || '',
+        addressLabel: b.label || `${b.street}${b.house ? `, ${b.house}` : ''}`,
+        distanceMeters: Math.max(1, Math.round(dist)),
+      };
+    }
+
+    return best;
+  }, [pendingPickCoords, buildings, resolverCtx]);
+
   // Favorites CRUD (Chrome IndexedDB + localStorage)
   const handleSaveFavorite = (b: BuildingRecord, note: string) => {
+    const resolved =
+      b.source === 'manual'
+        ? null
+        : b.currentVisual?.info || resolveBuilding(b.street, b.house, resolverCtx);
     const item: FavoriteAddress = {
       id: `fav_${Date.now()}`,
       key: b.key,
@@ -1060,6 +1121,8 @@ export default function App() {
       house: b.house,
       label: b.label,
       note: note.slice(0, 120),
+      queue: b.source === 'manual' ? b.manualQueue : resolved?.primary,
+      feeder: b.source === 'manual' ? b.manualFeeder : resolved?.feeder,
       lat: b.lat,
       lng: b.lng,
       savedAt: new Date().toISOString(),
@@ -1090,7 +1153,7 @@ export default function App() {
     showToast('Видалено з обраних');
   };
 
-  // Manual Point Picking (shared in Firestore for everyone when signed in, local fallback otherwise)
+  // Manual Point Picking (always deduplicated within 15m and published publicly for all users)
   const handleSaveManualPoint = async (input: {
     label: string;
     queue: SubqueueId;
@@ -1100,9 +1163,57 @@ export default function App() {
   }) => {
     if (!pendingPickCoords) return;
 
-    let savedId = `mp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    let savedToCloud = false;
+    const mLat = 111_132;
+    const mLng = 111_320 * Math.cos((pendingPickCoords.lat * Math.PI) / 180);
+    const existingNearby = mergedManualPoints.find(
+      (p) =>
+        Math.hypot(
+          (p.lat - pendingPickCoords.lat) * mLat,
+          (p.lng - pendingPickCoords.lng) * mLng
+        ) < 15
+    );
 
+    if (existingNearby) {
+      if (input.addToFavorites) {
+        const fav: FavoriteAddress = {
+          id: `fav_${existingNearby.id}`,
+          key: `manual|${existingNearby.id}`,
+          buildingId: existingNearby.id,
+          street: existingNearby.label,
+          house: '',
+          label: existingNearby.label,
+          note:
+            input.note ||
+            existingNearby.note ||
+            `Вказана точка · черга ${formatSubqueue(existingNearby.queue)}`,
+          queue: existingNearby.queue,
+          feeder: existingNearby.feeder || undefined,
+          lat: existingNearby.lat,
+          lng: existingNearby.lng,
+          savedAt: new Date().toISOString(),
+        };
+        setFavorites((prev) => {
+          const next = [fav, ...prev.filter((x) => x.key !== fav.key)];
+          void persistFavoritesToBrowserDb(next);
+          return next;
+        });
+      }
+      setPendingPickCoords(null);
+      setPickMode(false);
+      showToast(
+        `У цьому місці вже є спільна точка «${existingNearby.label}» (черга ${formatSubqueue(
+          existingNearby.queue
+        )}) — використано наявну`
+      );
+      return;
+    }
+
+    let savedId = `mp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    let savedToFirestore = false;
+    let savedToServer = false;
+    let resolvedPoint: ManualPoint | null = null;
+
+    // 1) If signed in with Google, save directly into permanent public Firestore
     if (authUser) {
       try {
         savedId = await createSharedManualPoint({
@@ -1113,18 +1224,50 @@ export default function App() {
           lat: pendingPickCoords.lat,
           lng: pendingPickCoords.lng,
         });
-        savedToCloud = true;
-      } catch (err) {
-        showToast(
-          err instanceof Error
-            ? `${err.message} — збережено локально`
-            : 'Не вдалося записати в Firestore — збережено локально',
-          'warn'
-        );
+        savedToFirestore = true;
+      } catch {
+        // Fall through to public server endpoint so point is still published for everyone
       }
     }
 
-    const pt: ManualPoint = {
+    // 2) If not signed in with Google (or Firestore write unavailable), publish via public server API
+    if (!savedToFirestore) {
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (telegramSessionToken) {
+          headers.Authorization = `Bearer ${telegramSessionToken}`;
+        }
+        const res = await fetch('/api/manual-points', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            label: input.label,
+            queue: input.queue,
+            feeder: input.feeder,
+            note: input.note,
+            lat: pendingPickCoords.lat,
+            lng: pendingPickCoords.lng,
+            visitorId: getOrCreateVisitorId(),
+          }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { point?: ManualPoint; duplicate?: boolean };
+          if (data?.point) {
+            resolvedPoint = data.point;
+            savedId = data.point.id;
+            savedToServer = true;
+            setServerManualPoints((prev) => [
+              data.point!,
+              ...prev.filter((x) => x.id !== data.point!.id),
+            ]);
+          }
+        }
+      } catch {
+        // Offline fallback — save locally
+      }
+    }
+
+    const pt: ManualPoint = resolvedPoint || {
       id: savedId,
       label: input.label,
       queue: input.queue,
@@ -1133,10 +1276,10 @@ export default function App() {
       lat: pendingPickCoords.lat,
       lng: pendingPickCoords.lng,
       createdAt: new Date().toISOString(),
-      isCloud: savedToCloud,
+      isCloud: savedToFirestore || savedToServer,
     };
 
-    if (!savedToCloud) {
+    if (!savedToFirestore && !savedToServer) {
       setManualPoints((prev) => {
         const next = [pt, ...prev];
         void persistManualPoints(next);
@@ -1153,6 +1296,8 @@ export default function App() {
         house: '',
         label: pt.label,
         note: pt.note || `Вказана точка · черга ${formatSubqueue(pt.queue)}`,
+        queue: pt.queue,
+        feeder: pt.feeder || undefined,
         lat: pt.lat,
         lng: pt.lng,
         savedAt: pt.createdAt,
@@ -1185,9 +1330,12 @@ export default function App() {
     setPendingPickCoords(null);
     setPickMode(false);
     showToast(
-      savedToCloud
-        ? `Точку «${pt.label}» збережено у спільну базу Firestore для всіх`
-        : `Точку «${pt.label}» збережено локально (увійдіть через Google для збереження для всіх)`
+      savedToFirestore
+        ? `Точку «${pt.label}» збережено у Firestore та опубліковано для всіх`
+        : savedToServer
+        ? `Точку «${pt.label}» збережено та опубліковано для всіх на карті`
+        : `Немає звʼязку з сервером — точку «${pt.label}» збережено локально`,
+      savedToFirestore || savedToServer ? 'info' : 'warn'
     );
   };
 
@@ -1217,6 +1365,41 @@ export default function App() {
         showToast('Спільну точку видалено з Firestore');
       } catch {
         showToast('Видалити спільну точку може лише її автор або адміністратор', 'warn');
+      }
+      return;
+    }
+
+    const serverTarget = serverManualPoints.find((p) => p.id === pointId);
+    if (serverTarget) {
+      try {
+        const headers: Record<string, string> = {
+          'x-visitor-id': getOrCreateVisitorId(),
+        };
+        if (telegramSessionToken) {
+          headers.Authorization = `Bearer ${telegramSessionToken}`;
+        }
+        const res = await fetch(`/api/manual-points/${encodeURIComponent(pointId)}`, {
+          method: 'DELETE',
+          headers,
+        });
+        if (!res.ok) {
+          showToast('Видалити спільну точку може лише її автор або адміністратор', 'warn');
+          return;
+        }
+        setServerManualPoints((prev) => prev.filter((p) => p.id !== pointId));
+        if (selectedBuilding?.id === pointId) {
+          setSelectedBuilding(null);
+        }
+        await appendAssignmentHistory({
+          action: 'point_removed',
+          title: serverTarget.label,
+          details: `Видалено спільну точку (черга ${formatSubqueue(serverTarget.queue)})`,
+          lat: serverTarget.lat,
+          lng: serverTarget.lng,
+        });
+        showToast('Спільну точку видалено');
+      } catch {
+        showToast('Помилка видалення точки', 'warn');
       }
       return;
     }
@@ -1784,6 +1967,34 @@ export default function App() {
 
           <PWAInstallButton />
 
+          {getTelegramWebApp() ? (
+            <button
+              type="button"
+              onClick={() => {
+                triggerTelegramHaptic('light');
+                openCurrentUrlInExternalBrowser();
+              }}
+              className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+              title="Відкрити повний сайт у зовнішньому браузері"
+              aria-label="Відкрити повний сайт у браузері"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+              <span className="hidden md:inline">Сайт</span>
+            </button>
+          ) : (
+            <a
+              href={`https://t.me/${telegramBotUsername || 'Map_light_asgard_bot'}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-sky-50 dark:bg-sky-950/60 hover:bg-sky-100 dark:hover:bg-sky-900/60 border border-sky-300 dark:border-sky-800 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+              title={`Відкрити Telegram-бот @${telegramBotUsername || 'Map_light_asgard_bot'}`}
+              aria-label="Telegram-бот"
+            >
+              <Send className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+              <span className="hidden md:inline">Telegram-бот</span>
+            </a>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -2072,6 +2283,7 @@ export default function App() {
           favorites={favorites}
           myHomeKey={myHomeKey}
           buildings={buildings}
+          manualPoints={mergedManualPoints}
           resolverCtx={resolverCtx}
           queuesMap={currentQueuesMap}
           availableDates={availableDates}
@@ -2094,7 +2306,12 @@ export default function App() {
           onFlyToFavorite={(fav) => mapRef.current?.flyToFavorite(fav.key, fav.lat, fav.lng)}
           onFlyToHome={() => {
             const b = buildings.find((x) => x.key === myHomeKey);
-            if (b) mapRef.current?.flyToBuilding(b.id);
+            if (b) {
+              mapRef.current?.flyToBuilding(b.id);
+              return;
+            }
+            const mp = mergedManualPoints.find((p) => `manual|${p.id}` === myHomeKey);
+            if (mp) mapRef.current?.flyToCoords(mp.lat, mp.lng, mp.id);
           }}
           onUpdateFavoriteNote={handleUpdateFavoriteNote}
           onRemoveFavorite={handleRemoveFavorite}
@@ -2168,6 +2385,7 @@ export default function App() {
           {pendingPickCoords && (
             <ManualPointModal
               coords={pendingPickCoords}
+              suggestedMatch={nearestPickSuggestion}
               onCancel={() => {
                 setPendingPickCoords(null);
                 setPickMode(false);
@@ -2282,7 +2500,12 @@ export default function App() {
           onClearHome={() => void handleClearHome()}
           onFlyToHome={() => {
             const b = buildings.find((x) => x.key === myHomeKey);
-            if (b) mapRef.current?.flyToBuilding(b.id);
+            if (b) {
+              mapRef.current?.flyToBuilding(b.id);
+              return;
+            }
+            const mp = mergedManualPoints.find((p) => `manual|${p.id}` === myHomeKey);
+            if (mp) mapRef.current?.flyToCoords(mp.lat, mp.lng, mp.id);
           }}
           onSelectSlot={(idx) => {
             setTimeSlot(idx);

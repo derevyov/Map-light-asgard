@@ -919,6 +919,240 @@ async function startServer() {
     res.status(400).json({ verified: false, configured: true, error: 'Відсутні дані Telegram для перевірки' });
   });
 
+  // ============================================================================
+  // Public Community Manual Points (shared across all visitors, incl. Telegram Mini App)
+  // ============================================================================
+  interface StoredPublicManualPoint {
+    id: string;
+    label: string;
+    queue: SubqueueId;
+    feeder: string;
+    note: string;
+    lat: number;
+    lng: number;
+    createdAt: string;
+    authorName?: string;
+    creatorHash?: string;
+  }
+
+  const PUBLIC_POINTS_PATH =
+    process.env.PUBLIC_POINTS_PATH?.trim() || '/tmp/dpem_public_manual_points_v1.json';
+  const PUBLIC_POINTS_MAX = 500;
+  const PUBLIC_POINT_DEDUP_METERS = 15;
+  const PUBLIC_POINT_RATE_WINDOW_MS = 60 * 60 * 1000;
+  const PUBLIC_POINT_RATE_MAX = 20;
+  const pointCreateRateByIp = new Map<string, number[]>();
+
+  let publicManualPoints: StoredPublicManualPoint[] = [];
+  try {
+    if (fs.existsSync(PUBLIC_POINTS_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(PUBLIC_POINTS_PATH, 'utf8'));
+      if (Array.isArray(raw)) {
+        publicManualPoints = raw
+          .filter(
+            (p): p is StoredPublicManualPoint =>
+              Boolean(p) &&
+              typeof p.id === 'string' &&
+              typeof p.label === 'string' &&
+              typeof p.queue === 'string' &&
+              SUBQUEUES.includes(p.queue as SubqueueId) &&
+              typeof p.lat === 'number' &&
+              typeof p.lng === 'number' &&
+              typeof p.createdAt === 'string'
+          )
+          .slice(0, PUBLIC_POINTS_MAX);
+      }
+    }
+  } catch {
+    publicManualPoints = [];
+  }
+
+  let publicPointsFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  function schedulePublicPointsFlush() {
+    if (publicPointsFlushTimer) return;
+    publicPointsFlushTimer = setTimeout(() => {
+      publicPointsFlushTimer = null;
+      try {
+        fs.writeFileSync(
+          PUBLIC_POINTS_PATH,
+          JSON.stringify(publicManualPoints.slice(0, PUBLIC_POINTS_MAX)),
+          'utf8'
+        );
+      } catch {
+        // ignore ephemeral disk write error
+      }
+    }, 1500);
+  }
+
+  function hashVisitorCreator(visitorId: string): string {
+    return crypto.createHmac('sha256', SESSION_SECRET).update(visitorId).digest('hex').slice(0, 32);
+  }
+
+  function distanceMetersBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const mLat = 111_132;
+    const mLng = 111_320 * Math.cos(((lat1 + lat2) * 0.5 * Math.PI) / 180);
+    return Math.hypot((lat1 - lat2) * mLat, (lng1 - lng2) * mLng);
+  }
+
+  function toPublicManualPointResponse(p: StoredPublicManualPoint) {
+    return {
+      id: p.id,
+      label: p.label,
+      queue: p.queue,
+      feeder: p.feeder,
+      note: p.note,
+      lat: p.lat,
+      lng: p.lng,
+      createdAt: p.createdAt,
+      authorName: p.authorName,
+      isCloud: true,
+    };
+  }
+
+  app.get('/api/manual-points', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      points: publicManualPoints.map(toPublicManualPointResponse),
+    });
+  });
+
+  app.post('/api/manual-points', express.json({ limit: '8kb' }), (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const ip =
+      String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown')
+        .split(',')[0]
+        .trim()
+        .slice(0, 64);
+    const now = Date.now();
+    const recentHits = (pointCreateRateByIp.get(ip) || []).filter(
+      (ts) => now - ts < PUBLIC_POINT_RATE_WINDOW_MS
+    );
+    if (recentHits.length >= PUBLIC_POINT_RATE_MAX) {
+      res.status(429).json({ error: 'Забагато нових точок за годину — спробуйте пізніше' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown> | undefined;
+    const label = typeof body?.label === 'string' ? body.label.trim().slice(0, 100) : '';
+    const queue = typeof body?.queue === 'string' ? body.queue.trim() : '';
+    const feeder = typeof body?.feeder === 'string' ? body.feeder.trim().slice(0, 80) : '';
+    const note = typeof body?.note === 'string' ? body.note.trim().slice(0, 240) : '';
+    const lat = Number(body?.lat);
+    const lng = Number(body?.lng);
+    const visitorId =
+      typeof body?.visitorId === 'string' && /^[a-zA-Z0-9_-]{4,64}$/.test(body.visitorId)
+        ? body.visitorId
+        : '';
+
+    if (label.length < 2) {
+      res.status(400).json({ error: 'Назва точки має містити щонайменше 2 символи' });
+      return;
+    }
+    if (!SUBQUEUES.includes(queue as SubqueueId)) {
+      res.status(400).json({ error: 'Некоректна підчерга ДПЕМ' });
+      return;
+    }
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < 47.7 ||
+      lat > 47.95 ||
+      lng < 31.0 ||
+      lng > 31.35
+    ) {
+      res.status(400).json({ error: 'Координати виходять за межі району Південноукраїнська' });
+      return;
+    }
+
+    const cleanLat = Number(lat.toFixed(6));
+    const cleanLng = Number(lng.toFixed(6));
+
+    // Deduplicate: if a public point already exists within 15m, reuse it instead of duplicating
+    const existingNearby = publicManualPoints.find(
+      (p) => distanceMetersBetween(p.lat, p.lng, cleanLat, cleanLng) < PUBLIC_POINT_DEDUP_METERS
+    );
+    if (existingNearby) {
+      res.status(200).json({
+        point: toPublicManualPointResponse(existingNearby),
+        duplicate: true,
+      });
+      return;
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const tgSession = bearer ? verifyTelegramSessionToken(bearer) : null;
+    const authorName = tgSession
+      ? (tgSession.username ? `@${tgSession.username}` : tgSession.firstName).slice(0, 80)
+      : 'Користувач карти';
+
+    const newPoint: StoredPublicManualPoint = {
+      id: `mp_pub_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      label,
+      queue: queue as SubqueueId,
+      feeder,
+      note,
+      lat: cleanLat,
+      lng: cleanLng,
+      createdAt: new Date().toISOString(),
+      authorName,
+      creatorHash: visitorId ? hashVisitorCreator(visitorId) : undefined,
+    };
+
+    recentHits.push(now);
+    pointCreateRateByIp.set(ip, recentHits);
+    if (pointCreateRateByIp.size > 2000) {
+      for (const [k, hits] of pointCreateRateByIp.entries()) {
+        if (hits.every((ts) => now - ts >= PUBLIC_POINT_RATE_WINDOW_MS)) {
+          pointCreateRateByIp.delete(k);
+        }
+      }
+    }
+
+    publicManualPoints = [newPoint, ...publicManualPoints].slice(0, PUBLIC_POINTS_MAX);
+    schedulePublicPointsFlush();
+
+    res.status(201).json({
+      point: toPublicManualPointResponse(newPoint),
+      duplicate: false,
+    });
+  });
+
+  app.delete('/api/manual-points/:id', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const id = req.params.id || '';
+    if (!/^[a-zA-Z0-9_-]{4,64}$/.test(id)) {
+      res.status(400).json({ error: 'Некоректний ID точки' });
+      return;
+    }
+    const idx = publicManualPoints.findIndex((p) => p.id === id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Точку не знайдено' });
+      return;
+    }
+
+    const target = publicManualPoints[idx];
+    const visitorHeader = String(req.header('x-visitor-id') || '').trim();
+    const isCreator =
+      Boolean(target.creatorHash) &&
+      /^[a-zA-Z0-9_-]{4,64}$/.test(visitorHeader) &&
+      hashVisitorCreator(visitorHeader) === target.creatorHash;
+
+    const authHeader = req.headers.authorization || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const tgSession = bearer ? verifyTelegramSessionToken(bearer) : null;
+    const isTgAdmin = Boolean(tgSession?.isTelegramAdmin);
+
+    if (!isCreator && !isTgAdmin) {
+      res.status(403).json({ error: 'Видалити спільну точку може лише її автор або адміністратор' });
+      return;
+    }
+
+    publicManualPoints.splice(idx, 1);
+    schedulePublicPointsFlush();
+    res.status(200).json({ ok: true });
+  });
+
   app.get('/api/osm', async (req, res) => {
     try {
       const force = req.query.force === '1';

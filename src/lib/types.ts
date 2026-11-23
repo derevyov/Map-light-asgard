@@ -158,6 +158,8 @@ export interface FavoriteAddress {
   house: string;
   label?: string;
   note: string;
+  queue?: SubqueueId;
+  feeder?: string;
   lat: number;
   lng: number;
   savedAt: string;
