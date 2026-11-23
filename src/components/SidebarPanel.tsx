@@ -46,6 +46,13 @@ import {
   SubqueueId,
   TelegramUserProfile,
 } from '../lib/types';
+import {
+  APP_VERSION,
+  APP_VERSION_FULL,
+  BUILD_COMMIT,
+  BUILD_TIME_LABEL,
+  forceReloadAppCache,
+} from '../lib/version';
 import type { AppMode } from './BuildingInspector';
 import { TelegramLoginButton } from './TelegramLoginButton';
 
@@ -248,6 +255,7 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
   const [editingFavNote, setEditingFavNote] = useState<string>('');
   const [now, setNow] = useState<Date>(() => new Date());
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [reloadingCache, setReloadingCache] = useState(false);
 
   useEffect(() => {
     setApiInput(apiUrl);
@@ -1491,6 +1499,41 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
               </section>
             </>
           )}
+        </div>
+
+        {/* App Version & Cache Refresh Footer */}
+        <div
+          className="shrink-0 px-3.5 py-2 border-t border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-[#0b1120]/90 flex items-center justify-between gap-2 text-[11px]"
+          title={APP_VERSION_FULL}
+        >
+          <div className="min-w-0 flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-mono truncate">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">
+              v{APP_VERSION}
+            </span>
+            {BUILD_TIME_LABEL && (
+              <span className="truncate text-[10px] text-slate-400 dark:text-slate-500">
+                · {BUILD_TIME_LABEL}
+              </span>
+            )}
+            {BUILD_COMMIT && (
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                #{BUILD_COMMIT}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={reloadingCache}
+            onClick={() => {
+              setReloadingCache(true);
+              void forceReloadAppCache();
+            }}
+            className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-[10px] font-medium text-slate-600 dark:text-slate-300 transition-colors disabled:opacity-60"
+            title="Скинути кеш PWA та завантажити найновішу версію"
+          >
+            <RefreshCw className={`w-3 h-3 ${reloadingCache ? 'animate-spin' : ''}`} />
+            <span>{reloadingCache ? 'Оновлення…' : 'Оновити кеш'}</span>
+          </button>
         </div>
       </aside>
     </>

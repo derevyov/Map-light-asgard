@@ -1,34 +1,15 @@
 import React, { useState } from 'react';
-import { Download, ExternalLink, Share, Smartphone, X } from 'lucide-react';
+import { Download, Share, Smartphone, X } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
-import { openCurrentUrlInExternalBrowser, triggerTelegramHaptic } from '../lib/telegram';
 
 export const PWAInstallButton: React.FC = () => {
   const { isInstallable, isInstalled, isIOS, isTelegram, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
-  // Already running as installed standalone PWA — hide button
-  if (isInstalled) {
+  // Already running as installed standalone PWA or inside Telegram Mini App
+  // (Telegram header already provides the dedicated "open in external browser" button)
+  if (isInstalled || isTelegram) {
     return null;
-  }
-
-  // Inside Telegram Mini App: offer one-tap jump to external browser to pin home-screen shortcut
-  if (isTelegram) {
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          triggerTelegramHaptic('light');
-          openCurrentUrlInExternalBrowser();
-        }}
-        className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-slate-100 transition-colors inline-flex items-center gap-1.5"
-        title="Відкрити в браузері (щоб додати ярлик PWA на екран)"
-        aria-label="Відкрити в браузері"
-      >
-        <ExternalLink className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-        <span className="hidden md:inline">Ярлик</span>
-      </button>
-    );
   }
 
   // Chromium / Android / Desktop native one-tap install

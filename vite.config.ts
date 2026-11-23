@@ -6,7 +6,32 @@ import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
+  let appVersion = '1.0.0';
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'),
+    ) as {version?: string};
+    if (pkg.version) {
+      appVersion = pkg.version;
+    }
+  } catch {
+    // Fallback to default version
+  }
+  const buildTime = new Date().toISOString();
+  const buildCommit = (
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.GIT_COMMIT ||
+    ''
+  )
+    .trim()
+    .slice(0, 7);
+
   return {
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion),
+      __BUILD_TIME__: JSON.stringify(buildTime),
+      __BUILD_COMMIT__: JSON.stringify(buildCommit),
+    },
     plugins: [
       react(),
       tailwindcss(),

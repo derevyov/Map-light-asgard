@@ -38,6 +38,7 @@ import {
   persistFavoritesToBrowserDb,
   readFavoritesSync,
 } from './lib/favoritesStore';
+import { APP_VERSION, APP_VERSION_FULL } from './lib/version';
 import {
   approveAccessRequest,
   cancelAccessRequest,
@@ -1856,11 +1857,15 @@ export default function App() {
         <button
           type="button"
           onClick={() => setActivePage('map')}
+          title={`Карта ГПВ ДПЕМ · ${APP_VERSION_FULL}`}
           className="flex items-center gap-1.5 sm:gap-2 shrink-0 text-left"
         >
           <Zap className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
           <span className="text-sm sm:text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
             <span className="hidden sm:inline">Південноукраїнськ · </span>ГПВ ДПЕМ
+          </span>
+          <span className="hidden md:inline-block font-mono text-[10px] font-medium text-slate-500 dark:text-slate-400 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/70">
+            v{APP_VERSION}
           </span>
         </button>
 
@@ -1975,7 +1980,7 @@ export default function App() {
                 openCurrentUrlInExternalBrowser();
               }}
               className="p-2 sm:px-2.5 sm:py-1.5 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
-              title="Відкрити повний сайт у зовнішньому браузері"
+              title="Відкрити повний сайт у зовнішньому браузері (та додати ярлик PWA)"
               aria-label="Відкрити повний сайт у браузері"
             >
               <ExternalLink className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
