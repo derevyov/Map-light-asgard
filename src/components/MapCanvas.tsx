@@ -72,7 +72,6 @@ export const MapCanvas = React.forwardRef<MapCanvasHandle, MapCanvasProps>(
     const tileLayerRef = useRef<L.TileLayer | null>(null);
     const buildingsLayerGroupRef = useRef<L.LayerGroup | null>(null);
     const manualLayerGroupRef = useRef<L.LayerGroup | null>(null);
-    const substationsLayerGroupRef = useRef<L.LayerGroup | null>(null);
     const baseBuildingsRef = useRef<ManagedBuilding[]>([]);
     const manualManagedRef = useRef<ManagedBuilding[]>([]);
     const diffEngineRef = useRef<DiffRenderEngine>(new DiffRenderEngine());
@@ -149,17 +148,15 @@ export const MapCanvas = React.forwardRef<MapCanvasHandle, MapCanvasProps>(
     const populateMapLayers = async (forceRefresh: boolean) => {
       const map = mapRef.current;
       const bGroup = buildingsLayerGroupRef.current;
-      const sGroup = substationsLayerGroupRef.current;
-      if (!map || !bGroup || !sGroup) return;
+      if (!map || !bGroup) return;
 
       setLoadingOsm(true);
       bGroup.clearLayers();
-      sGroup.clearLayers();
       baseBuildingsRef.current = [];
       diffEngineRef.current.clearCache();
 
       let osmCount = 0;
-      let substationCount = 0;
+      const substationCount = 0;
       let fromCache = false;
 
       try {
@@ -182,24 +179,6 @@ export const MapCanvas = React.forwardRef<MapCanvasHandle, MapCanvasProps>(
           if (coords.length < 3) continue;
 
           if (el.tags?.power === 'substation') {
-            substationCount++;
-            const subPoly = L.polygon(coords, {
-              color: '#eab308',
-              weight: 2,
-              fillColor: '#ca8a04',
-              fillOpacity: 0.28,
-            });
-            const popupEl = document.createElement('div');
-            const title = document.createElement('strong');
-            title.textContent = el.tags?.name || 'Підстанція ТП / ПС';
-            const sub = document.createElement('div');
-            sub.style.fontSize = '11px';
-            sub.style.opacity = '0.75';
-            sub.textContent = 'Обʼєкт електромережі OSM (power=substation)';
-            popupEl.appendChild(title);
-            popupEl.appendChild(sub);
-            subPoly.bindPopup(popupEl);
-            subPoly.addTo(sGroup);
             continue;
           }
 
@@ -315,10 +294,8 @@ export const MapCanvas = React.forwardRef<MapCanvasHandle, MapCanvasProps>(
       }).addTo(map);
       tileLayerRef.current = initialTile;
 
-      const sGroup = L.layerGroup().addTo(map);
       const bGroup = L.layerGroup().addTo(map);
       const mGroup = L.layerGroup().addTo(map);
-      substationsLayerGroupRef.current = sGroup;
       buildingsLayerGroupRef.current = bGroup;
       manualLayerGroupRef.current = mGroup;
       mapRef.current = map;

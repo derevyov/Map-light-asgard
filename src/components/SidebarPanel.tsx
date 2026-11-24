@@ -726,10 +726,10 @@ export const SidebarPanel: React.FC<SidebarPanelProps> = ({
                   </div>
                   <div>
                     <div className="text-slate-500 dark:text-slate-400 text-[11px]">
-                      Підстанцій OSM
+                      Фідерів у базі
                     </div>
                     <div className="font-mono text-base font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
-                      {osmStats.substationCount}
+                      {addressIndex.feeders.length}
                     </div>
                   </div>
                 </div>
